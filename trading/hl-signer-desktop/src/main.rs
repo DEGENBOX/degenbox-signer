@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
+mod branding;
 mod config;
 mod daemon;
 mod hl_info;
@@ -168,6 +169,7 @@ async fn main() -> Result<()> {
         // Non-TTY / --headless with no subcommand — print the help
         // text so cron / `nohup` users get something actionable
         // instead of an opaque "expected a subcommand" panic.
+        println!("{}", branding::wordmark());
         use clap::CommandFactory;
         Cli::command().print_help()?;
         println!();
@@ -210,17 +212,34 @@ fn is_tty() -> bool {
 }
 
 async fn cmd_check_update() -> Result<()> {
+    println!("{}", branding::wordmark());
     match self_update::check().await {
         Some(info) => {
             println!(
-                "  update available: {} → {} ({})",
-                info.current, info.latest, info.tag
+                "  {} update available: {} {} {} ({})",
+                branding::prefix(),
+                branding::accent_bold(&info.current),
+                branding::muted("→"),
+                branding::accent_bold(&info.latest),
+                branding::muted(&info.tag),
             );
-            println!("  release notes:    {}", info.html_url);
-            println!("  install with:     hl-signer-desktop self-update");
+            println!(
+                "  {} release notes:    {}",
+                branding::muted("·"),
+                branding::ink(&info.html_url)
+            );
+            println!(
+                "  {} install with:     {}",
+                branding::muted("·"),
+                branding::accent("hl-signer-desktop self-update")
+            );
         }
         None => {
-            println!("  up to date ({}).", env!("CARGO_PKG_VERSION"));
+            println!(
+                "  {} up to date ({}).",
+                branding::tick(),
+                branding::accent_bold(env!("CARGO_PKG_VERSION"))
+            );
         }
     }
     Ok(())
@@ -238,13 +257,24 @@ fn cmd_setup(
         .map(Ok)
         .unwrap_or_else(config::default_config_path)?;
 
+    println!("{}", branding::wordmark());
+    println!("{}", branding::heading("Setup"));
     println!();
-    println!("  DegenBox HL Signer — Setup");
-    println!("  -------------------------------");
-    println!();
-    println!("  1. Visit https://app.hyperliquid.xyz/API");
-    println!("  2. Generate an API wallet (an \"API agent\") for your account.");
-    println!("  3. Copy the private key — paste it below.");
+    println!(
+        "  {} Visit {}",
+        branding::prefix(),
+        branding::accent("https://app.hyperliquid.xyz/API")
+    );
+    println!(
+        "  {} Generate an API wallet (an {}) for your account.",
+        branding::prefix(),
+        branding::ink("\"API agent\"")
+    );
+    println!(
+        "  {} Copy the private key {} paste it below.",
+        branding::prefix(),
+        branding::muted("—")
+    );
     println!();
 
     let private_key = if non_interactive {
@@ -254,9 +284,8 @@ fn cmd_setup(
             .context("read private key from stdin")?;
         line.trim().to_string()
     } else {
-        rpassword::prompt_password("  Private key (hex, hidden): ")?
-            .trim()
-            .to_string()
+        let prompt = format!("  {} Private key (hex, hidden): ", branding::prefix());
+        rpassword::prompt_password(&prompt)?.trim().to_string()
     };
     if private_key.is_empty() {
         return Err(anyhow!("private key is required"));
@@ -267,8 +296,10 @@ fn cmd_setup(
         std::env::var("HL_SIGNER_PASSPHRASE")
             .map_err(|_| anyhow!("HL_SIGNER_PASSPHRASE env required in --non-interactive"))?
     } else {
-        let pw1 = rpassword::prompt_password("  Encryption passphrase: ")?;
-        let pw2 = rpassword::prompt_password("  Repeat passphrase:     ")?;
+        let p1 = format!("  {} Encryption passphrase: ", branding::prefix());
+        let p2 = format!("  {} Repeat passphrase:     ", branding::prefix());
+        let pw1 = rpassword::prompt_password(&p1)?;
+        let pw2 = rpassword::prompt_password(&p2)?;
         if pw1 != pw2 {
             return Err(anyhow!("passphrases did not match"));
         }
@@ -282,13 +313,31 @@ fn cmd_setup(
     config::save(&cfg_path, &cfg)?;
 
     println!();
-    println!("  Keystore written: {}", ks_path.display());
-    println!("  Agent address:    {}", address);
-    println!("  Config:           {}", cfg_path.display());
+    println!(
+        "  {} {} {}",
+        branding::tick(),
+        branding::muted("Keystore written:"),
+        branding::ink(&ks_path.display().to_string())
+    );
+    println!(
+        "  {} {} {}",
+        branding::tick(),
+        branding::muted("Agent address:   "),
+        branding::accent_bold(&address)
+    );
+    println!(
+        "  {} {} {}",
+        branding::tick(),
+        branding::muted("Config:          "),
+        branding::ink(&cfg_path.display().to_string())
+    );
     println!();
-    println!("  Next:");
-    println!("    hl-signer-desktop register --server=<url> --token=<api_token>");
-    println!("    hl-signer-desktop daemon");
+    println!("  {}", branding::accent_bold("Next:"));
+    println!(
+        "    {}",
+        branding::accent("hl-signer-desktop register --server=<url> --token=<api_token>")
+    );
+    println!("    {}", branding::accent("hl-signer-desktop daemon"));
     println!();
     Ok(())
 }
@@ -363,15 +412,44 @@ async fn cmd_register(
     };
     cfg.agent_address = Some(agent_address.clone());
     config::save(&cfg_path, &cfg)?;
-    println!("  Registered.");
-    println!("  User:    {}", resp.user_id);
-    println!("  Agent:   {}", resp.agent_address);
-    println!("  Server:  {}", cfg.server_url);
+    println!("{}", branding::wordmark());
+    println!(
+        "  {} {}",
+        branding::tick(),
+        branding::accent_bold("Registered.")
+    );
+    println!(
+        "  {} {} {}",
+        branding::muted("·"),
+        branding::muted("User:   "),
+        branding::ink(&resp.user_id)
+    );
+    println!(
+        "  {} {} {}",
+        branding::muted("·"),
+        branding::muted("Agent:  "),
+        branding::accent_bold(&resp.agent_address)
+    );
+    println!(
+        "  {} {} {}",
+        branding::muted("·"),
+        branding::muted("Server: "),
+        branding::ink(&cfg.server_url)
+    );
     match &cfg.account_address {
-        Some(a) => println!("  Account: {a}"),
+        Some(a) => println!(
+            "  {} {} {}",
+            branding::muted("·"),
+            branding::muted("Account:"),
+            branding::accent_bold(a)
+        ),
         None => println!(
-            "  Account: (not set — Close / TP / SL will fail until you run \
-             `register --account=0x…`)"
+            "  {} {} {}",
+            branding::warn("!"),
+            branding::muted("Account:"),
+            branding::warn(
+                "(not set — Close / TP / SL will fail until you run `register --account=0x…`)"
+            )
         ),
     }
     Ok(())
@@ -401,14 +479,30 @@ async fn cmd_daemon(
         nats_url,
         user_id: None,
     };
+    // Branded daemon banner. Tracing is initialised by `init_tracing`
+    // upstream; we print this once before the daemon's poll loop so
+    // operators see a clear marker in journald / `script` recordings.
+    eprintln!("{}", branding::wordmark());
+    eprintln!(
+        "  {} {}  {}",
+        branding::brand_tag(),
+        branding::status_pill("connecting"),
+        branding::muted("registering with server…")
+    );
     // v1 parity: probe for a newer release on startup, then re-check
     // once every 24h while the daemon is alive. The check is
     // best-effort and silent on failure — see `self_update::check`.
     if let Some(info) = self_update::check().await {
         eprintln!();
         eprintln!(
-            "  update available: {} → {} ({}). Run `hl-signer-desktop self-update` to upgrade.",
-            info.current, info.latest, info.tag
+            "  {} {} {} {} {} ({}). Run {} to upgrade.",
+            branding::brand_tag(),
+            branding::warn("\u{2191} update available:"),
+            branding::accent_bold(&info.current),
+            branding::muted("→"),
+            branding::accent_bold(&info.latest),
+            branding::muted(&info.tag),
+            branding::accent("`hl-signer-desktop self-update`")
         );
         eprintln!();
     }
@@ -435,9 +529,24 @@ fn cmd_migrate(from: PathBuf, to: Option<PathBuf>) -> Result<()> {
         std::fs::set_permissions(&to_path, std::fs::Permissions::from_mode(0o600))?;
     }
     let address = keystore::peek_address(&to_path)?;
-    println!("  Legacy keystore adopted at {}", to_path.display());
-    println!("  Agent address: {}", address);
-    println!("  Same passphrase as the legacy bot — the envelope is unchanged.");
+    println!("{}", branding::wordmark());
+    println!(
+        "  {} {} {}",
+        branding::tick(),
+        branding::muted("Legacy keystore adopted at"),
+        branding::ink(&to_path.display().to_string())
+    );
+    println!(
+        "  {} {} {}",
+        branding::muted("·"),
+        branding::muted("Agent address:"),
+        branding::accent_bold(&address)
+    );
+    println!(
+        "  {} {}",
+        branding::muted("·"),
+        branding::muted("Same passphrase as the legacy bot — the envelope is unchanged.")
+    );
     Ok(())
 }
 
@@ -456,7 +565,8 @@ fn read_passphrase(stdin: bool) -> Result<String> {
         std::io::stdin().read_line(&mut buf)?;
         Ok(buf.trim_end_matches(['\r', '\n']).to_string())
     } else {
-        Ok(rpassword::prompt_password("  Keystore passphrase: ")?)
+        let prompt = format!("  {} Keystore passphrase: ", branding::prefix());
+        Ok(rpassword::prompt_password(&prompt)?)
     }
 }
 

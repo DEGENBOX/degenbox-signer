@@ -75,6 +75,18 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         })
         .await?;
     info!(user_id = %reg.user_id, agent = %reg.agent_address, "registered with server");
+    // Branded one-liner so operators see a clear "we're live" marker
+    // separate from the tracing stream. Mirrors the web UI's
+    // StatusBadge treatment: green dot + "ready" label.
+    eprintln!(
+        "  {} {}  {} {} {} {}",
+        crate::branding::brand_tag(),
+        crate::branding::status_pill("ready"),
+        crate::branding::muted("user"),
+        crate::branding::accent_bold(&reg.user_id),
+        crate::branding::muted("·  agent"),
+        crate::branding::accent_bold(&reg.agent_address)
+    );
 
     // Spawn the NATS push channel (best-effort).
     let (nudge_tx, mut nudge_rx) = tokio::sync::mpsc::channel::<()>(8);

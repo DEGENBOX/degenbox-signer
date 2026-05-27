@@ -57,10 +57,15 @@ pub fn header(frame: &mut Frame<'_>, area: Rect, props: HeaderProps, theme: Them
             theme.warn().add_modifier(Modifier::BOLD),
         ));
     }
-    let title = Line::from(vec![Span::styled(
-        "  DegenBox HL Signer",
-        theme.accent().add_modifier(Modifier::BOLD),
-    )]);
+    let title = Line::from(vec![
+        Span::styled("  ::    ::  ", theme.accent().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "DegenBox HL Signer",
+            theme.accent().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("   "),
+        Span::styled("keys stay local · self-custody", theme.muted()),
+    ]);
     let body = Line::from(spans);
     let lines = vec![title, body];
     let block = Block::default()

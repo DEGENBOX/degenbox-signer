@@ -111,8 +111,14 @@ pub fn spawn_daily_check() {
             if let Some(info) = check().await {
                 eprintln!();
                 eprintln!(
-                    "  update available: {} → {} ({}). Run `{} self-update` to upgrade.",
-                    info.current, info.latest, info.tag, ASSET_BASENAME
+                    "  {} {} {} {} {} ({}). Run {} to upgrade.",
+                    crate::branding::brand_tag(),
+                    crate::branding::warn("\u{2191} update available:"),
+                    crate::branding::accent_bold(&info.current),
+                    crate::branding::muted("→"),
+                    crate::branding::accent_bold(&info.latest),
+                    crate::branding::muted(&info.tag),
+                    crate::branding::accent(&format!("`{ASSET_BASENAME} self-update`"))
                 );
             }
         }
@@ -129,8 +135,14 @@ pub async fn run_self_update() -> Result<()> {
         ));
     };
     let current = current_version();
+    println!("{}", crate::branding::wordmark());
     if !is_newer(&ver, current) {
-        println!("  already up to date ({current}).");
+        println!(
+            "  {} {} ({}).",
+            crate::branding::tick(),
+            crate::branding::accent_bold("already up to date"),
+            crate::branding::ink(current)
+        );
         return Ok(());
     }
 
@@ -152,7 +164,12 @@ pub async fn run_self_update() -> Result<()> {
             )
         })?;
 
-    println!("  downloading {} …", asset.name);
+    println!(
+        "  {} {} {}",
+        crate::branding::prefix(),
+        crate::branding::muted("downloading"),
+        crate::branding::accent(&asset.name)
+    );
     let bytes = download_bytes(&asset.browser_download_url).await?;
 
     // Validate against SHASUMS256.txt before touching disk.
@@ -172,12 +189,23 @@ pub async fn run_self_update() -> Result<()> {
             actual
         ));
     }
-    println!("  sha256 verified ({})", &actual[..16]);
+    println!(
+        "  {} {} ({})",
+        crate::branding::tick(),
+        crate::branding::accent_bold("sha256 verified"),
+        crate::branding::muted(&actual[..16])
+    );
 
     let staged = stage_new_binary(&bytes, ASSET_BASENAME)?;
     let current_exe = std::env::current_exe().context("locate current executable")?;
     atomic_swap(&staged, &current_exe)?;
-    println!("  upgraded to {} — restart the daemon.", release.tag_name);
+    println!(
+        "  {} {} {} {}",
+        crate::branding::tick(),
+        crate::branding::accent_bold("upgraded to"),
+        crate::branding::ink(&release.tag_name),
+        crate::branding::muted("— restart the daemon.")
+    );
     Ok(())
 }
 

@@ -46,23 +46,28 @@ jobs:
             runner: macos-14
             os: macos
             ext: tar.gz
+            build_solana: true
           - target: x86_64-apple-darwin
             # macOS Intel runner — macos-13 was retired; macos-15-intel is the
             # current x86_64 image. (macos-14 and newer arm-only labels are arm64.)
             runner: macos-15-intel
             os: macos
             ext: tar.gz
+            build_solana: true
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             os: linux
             ext: tar.gz
-          # x86_64-pc-windows-msvc — DROPPED for now. The Solana toolchain
-          # (signer-cli) pulls `openssl-sys` which needs strawberry-perl
-          # + a vanilla openssl on Windows MSVC and reliably blows up CI.
-          # Re-add once we either (a) switch Solana TLS to rustls or
-          # (b) compile vendored openssl from the C source on CI. macOS +
-          # Linux cover 95%+ of trader users; Windows users build from
-          # source via `cargo install --path trading/hl-signer-desktop`.
+            build_solana: true
+          # Windows: hl-signer-desktop only — it uses rustls, no OpenSSL.
+          # signer-cli (Solana) is skipped here; openssl-sys on MSVC needs
+          # strawberry-perl + vendored openssl. Re-enable when signer-cli
+          # switches to rustls.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            os: windows
+            ext: zip
+            build_solana: false
 
     steps:
       - uses: actions/checkout@v4
@@ -148,14 +153,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           New-Item -ItemType Directory -Force -Path staging | Out-Null
 
-          # hl-signer-desktop
+          # hl-signer-desktop only (signer-cli/Solana skipped on Windows — openssl-sys)
           $name = "hl-signer-desktop-$tag-$target"
           $stage = "staging/$name"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/$target/release/hl-signer-desktop.exe" $stage
           if (Test-Path "trading/hl-signer-desktop/INSTALL.md") { Copy-Item "trading/hl-signer-desktop/INSTALL.md" $stage }
           Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
-
 
       - name: Checksum (unix)
         if: matrix.os != 'windows'

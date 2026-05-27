@@ -1,10 +1,38 @@
-//! Color tokens.
+//! Color tokens — wired to the DegenBox web palette.
 //!
-//! Respects `NO_COLOR=1` (https://no-color.org). When set, every
-//! style returned here is `Style::default()` — the layout still
-//! draws but with the terminal's default fg/bg.
+//! Mapping (web CSS var  →  ratatui `Color::Rgb`):
+//!
+//!   --accent     #7bebc4   rgb(123, 235, 196)   brand green, action / focus
+//!   --up         #7bebc4   rgb(123, 235, 196)   ok / ready / long / filled
+//!   --down       #f43f5e   rgb(244,  63,  94)   err / offline / short
+//!   --warn       #f4a261   rgb(244, 162,  97)   amber for connecting / pending
+//!   --ink-1      #e8eaee   rgb(232, 234, 238)   primary text (neutral)
+//!   --ink-3      #8e929e   rgb(142, 146, 158)   muted labels
+//!   --canvas     #16171b   rgb( 22,  23,  27)   page background
+//!
+//! Respects `NO_COLOR=1` (https://no-color.org). When set, every style
+//! returned here is `Style::default()` — the layout still draws but
+//! with the terminal's default fg/bg.
 
 use ratatui::style::{Color, Modifier, Style};
+
+/// DegenBox accent green — matches `--accent` / `--up` in the web app.
+pub const BRAND_ACCENT: Color = Color::Rgb(123, 235, 196);
+/// DegenBox down red — matches `--down` in the web app.
+pub const BRAND_DOWN: Color = Color::Rgb(244, 63, 94);
+/// DegenBox amber — used for "connecting" / "pending" status. The web
+/// app doesn't expose a CSS var for this; we picked an orange that
+/// reads well against `--canvas` in both dark and light terminals.
+pub const BRAND_WARN: Color = Color::Rgb(244, 162, 97);
+/// Primary ink — matches `--ink-1` (near-white on dark canvas).
+pub const BRAND_INK_1: Color = Color::Rgb(232, 234, 238);
+/// Muted ink — matches `--ink-3`.
+pub const BRAND_INK_3: Color = Color::Rgb(142, 146, 158);
+/// Page canvas — matches `--canvas`.
+pub const BRAND_CANVAS: Color = Color::Rgb(22, 23, 27);
+/// Accent ink — matches `--accent-ink` (very dark, used as fg on the
+/// filled accent tab pill).
+pub const BRAND_ACCENT_INK: Color = Color::Rgb(11, 12, 14);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
@@ -26,7 +54,7 @@ impl Theme {
 
     pub fn ok(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Green)
+            Style::default().fg(BRAND_ACCENT)
         } else {
             Style::default()
         }
@@ -34,7 +62,7 @@ impl Theme {
 
     pub fn warn(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(BRAND_WARN)
         } else {
             Style::default()
         }
@@ -42,7 +70,7 @@ impl Theme {
 
     pub fn err(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Red)
+            Style::default().fg(BRAND_DOWN)
         } else {
             Style::default()
         }
@@ -50,7 +78,7 @@ impl Theme {
 
     pub fn neutral(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(BRAND_INK_1)
         } else {
             Style::default()
         }
@@ -58,7 +86,7 @@ impl Theme {
 
     pub fn muted(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(BRAND_INK_3)
         } else {
             Style::default().add_modifier(Modifier::DIM)
         }
@@ -66,7 +94,7 @@ impl Theme {
 
     pub fn accent(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(BRAND_ACCENT)
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         }
@@ -75,8 +103,8 @@ impl Theme {
     pub fn tab_active(self) -> Style {
         if self.colored {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(BRAND_ACCENT_INK)
+                .bg(BRAND_ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
@@ -85,7 +113,7 @@ impl Theme {
 
     pub fn tab_inactive(self) -> Style {
         if self.colored {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(BRAND_INK_3)
         } else {
             Style::default()
         }
@@ -93,7 +121,7 @@ impl Theme {
 
     pub fn header_bg(self) -> Style {
         if self.colored {
-            Style::default().bg(Color::Black)
+            Style::default().bg(BRAND_CANVAS)
         } else {
             Style::default()
         }
@@ -118,5 +146,16 @@ mod tests {
         let t = Theme { colored: true };
         assert_ne!(t.ok(), t.warn());
         assert_ne!(t.warn(), t.err());
+    }
+
+    #[test]
+    fn brand_palette_matches_web_tokens() {
+        // Sanity: lock the RGB triples so a future refactor can't
+        // silently drift the brand colors away from the web palette.
+        assert_eq!(BRAND_ACCENT, Color::Rgb(123, 235, 196));
+        assert_eq!(BRAND_DOWN, Color::Rgb(244, 63, 94));
+        assert_eq!(BRAND_INK_1, Color::Rgb(232, 234, 238));
+        assert_eq!(BRAND_INK_3, Color::Rgb(142, 146, 158));
+        assert_eq!(BRAND_CANVAS, Color::Rgb(22, 23, 27));
     }
 }
