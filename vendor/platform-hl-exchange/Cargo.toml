@@ -1,0 +1,46 @@
+[package]
+name = "platform-hl-exchange"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Pure-library HL `/exchange` client + EIP-712 signing infrastructure.
+#
+# Owns:
+#   - `ExchangeClient`        — reqwest POST to `/exchange`
+#   - `AgentSigner`           — secp256k1 EIP-712 over msgpack(action) hash
+#   - Action types            — order / cancel / updateLeverage / approveAgent
+#   - Helpers                 — connectionId, typed-data hash, cloid mint
+#
+# No DB, no NATS, no Postgres. The `module-hyperliquid::exchange` layer
+# composes this crate with persistence + risk + per-user agent-key
+# resolution.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rust_decimal = { workspace = true }
+chrono.workspace = true
+uuid.workspace = true
+hex = "0.4"
+
+# Secp256k1 (Ethereum / HL signing).
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
+# Keccak-256 for the EIP-712 domain hash + connectionId.
+sha3 = "0.10"
+# Msgpack encoding for `connectionId` action serialisation. HL uses the
+# `vmihailenco/msgpack` Go library on its server-side; `rmp-serde` is
+# the canonical pure-Rust equivalent (binary-compatible for the field
+# shapes we encode).
+rmp-serde = "1.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rust_decimal_macros.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,48 @@
+# Public-repo workspace root. The private monorepo keeps
+# hl-signer-desktop as its own independent workspace (so the gateway's
+# heavy backend deps don't pollute user-facing builds). In this public
+# repo we flatten it into one workspace so `cargo build --release` at
+# the repo root reproduces the published binary in a single command.
+
+[workspace]
+resolver = "2"
+members = [
+    "trading/hl-signer-desktop",
+    "vendor/platform-hl-exchange",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+version = "0.1.0"
+
+# These keys are referenced by vendor/platform-hl-exchange/Cargo.toml
+# via `.workspace = true`. In the private monorepo they come from a
+# much larger top-level Cargo.toml; here we re-declare just the subset
+# that hl-exchange actually uses so the public repo builds standalone.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+tokio = { version = "1", features = ["full"] }
+
+[workspace.lints]
+# Intentionally empty — `hl-exchange/Cargo.toml` ends with `[lints]
+# workspace = true` so this hook must exist for the inheritance to
+# resolve. We don't force any specific lint policy on auditors.
+
+[profile.release]
+# Match the private repo's release profile so reproducing binaries
+# from this repo yields artifacts close to (ideally identical with)
+# the published GH-release tarballs.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

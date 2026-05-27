@@ -1,0 +1,25 @@
+# Cargo build artifacts
+target/
+**/target/
+Cargo.lock.bak
+
+# Editor scratch
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs from the daemon's tracing-subscriber output
+*.log
+
+# Local env / secrets — there should never be any in this repo, but
+# belt-and-suspenders.
+.env
+.env.*
+!.env.example
+.secrets-local/
+*.key
+*.pem
+keystore.json
+hl-keystore.json

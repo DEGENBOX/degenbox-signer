@@ -1,0 +1,78 @@
+[package]
+name = "hl-signer-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Local desktop signer for DegenBox Hyperliquid trading — holds an encrypted API agent key, polls the server for queued instructions, signs locally, POSTs to HL."
+publish = false
+
+[[bin]]
+name = "hl-signer-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# HL EIP-712 signing + /exchange transport — same library the server
+# used to use before the desktop-signer pivot. Pinned to the workspace
+# version so the wire shape is identical end-to-end.
+platform-hl-exchange = { path = "../../vendor/platform-hl-exchange" }
+
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+hex = "0.4"
+rust_decimal = { version = "1.36", features = ["serde"] }
+async-trait = "0.1"
+
+# Keystore envelope — same algorithm as the legacy Go bot so users
+# can migrate without re-pasting their private key.
+# Argon2id (time=3, memory=64MB, threads=4) + AES-256-GCM.
+argon2 = { version = "0.5", default-features = false, features = ["std", "alloc"] }
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Address derivation from the secp256k1 secret — same path as the
+# legacy bot (keccak[12..] of the uncompressed pubkey).
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
+sha3 = "0.10"
+
+# HTTP — talks to BOTH the DegenBox server (register/poll/result) and
+# Hyperliquid's `/exchange` endpoint (via platform_hl_exchange).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
+# NATS subscriber for sub-second push from the server. Optional — the
+# polling loop is the source of truth; NATS is just a low-latency
+# nudge that the loop should poll right now.
+async-nats = "0.38"
+futures = "0.3"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Atomic writes to the keystore file so a crash mid-write doesn't
+# corrupt the user's only copy of their (encrypted) private key.
+tempfile = "3"
+
+# Self-update flow: verify downloaded binaries against the release's
+# SHASUMS256.txt before swapping them in (v1 parity).
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+
+# Interactive TUI — the default invocation (no args) opens it. The
+# original `setup` / `register` / `daemon` subcommands stay around for
+# headless / systemd users; the TUI layer is purely additive.
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+unicode-width = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rust_decimal_macros = "1.36"
+
+# hl-signer-desktop is intentionally not in the backend workspace —
+# users will build it as a standalone artifact. Same convention as
+# signer-desktop (the Solana sibling).

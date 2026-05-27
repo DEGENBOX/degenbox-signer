@@ -1,0 +1,272 @@
+name: Release Signers
+
+# Builds and publishes pre-compiled signer binaries for end users so
+# they no longer need to `cargo install` from source.
+#
+# Triggered by pushing a tag like `v0.1.0-signer`. The matrix builds
+# four target platforms in parallel for both signer binaries
+# (`hl-signer-desktop` for Hyperliquid + `degenbox-signer-cli` for
+# Solana), packages them, computes sha256, then a final job creates a
+# GitHub Release with all artifacts + a SHASUMS256.txt body.
+#
+# TODO: codesign + notarize macOS builds once Apple Developer Program
+# is set up — until then macOS users see a "cannot verify developer"
+# warning on first run and must allow it in System Settings > Privacy
+# & Security.
+#
+# TODO: Windows MSI installer (currently we ship a plain .zip with the
+# .exe). Users have to unzip + add to PATH manually.
+
+on:
+  push:
+    tags:
+      - "v*-signer"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to build + publish (e.g. v0.1.0-signer)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            os: macos
+            ext: tar.gz
+          - target: x86_64-apple-darwin
+            # macOS Intel runner — macos-13 was retired; macos-15-intel is the
+            # current x86_64 image. (macos-14 and newer arm-only labels are arm64.)
+            runner: macos-15-intel
+            os: macos
+            ext: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            os: linux
+            ext: tar.gz
+          # x86_64-pc-windows-msvc — DROPPED for now. The Solana toolchain
+          # (signer-cli) pulls `openssl-sys` which needs strawberry-perl
+          # + a vanilla openssl on Windows MSVC and reliably blows up CI.
+          # Re-add once we either (a) switch Solana TLS to rustls or
+          # (b) compile vendored openssl from the C source on CI. macOS +
+          # Linux cover 95%+ of trader users; Windows users build from
+          # source via `cargo install --path trading/hl-signer-desktop`.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag / version
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          # Validate: only allow tags like vMAJOR.MINOR.PATCH(-prerelease)-signer
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?-signer$'; then
+            echo "ERROR: tag '$tag' does not match v<MAJOR>.<MINOR>.<PATCH>[-prerelease]-signer" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          ver="${tag#v}"
+          ver="${ver%-signer}"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Each signer crate is its own workspace (independent Cargo.lock).
+      # Cache per crate + target so re-tagging is fast.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            trading/hl-signer-desktop -> target
+          key: ${{ matrix.target }}
+
+      - name: Build hl-signer-desktop
+        shell: bash
+        working-directory: trading/hl-signer-desktop
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --bin hl-signer-desktop --target "$TARGET"
+
+
+      - name: Strip debug symbols (unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          strip "trading/hl-signer-desktop/target/$TARGET/release/hl-signer-desktop" || true
+
+      - name: Package (unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging
+
+          # hl-signer-desktop
+          name="hl-signer-desktop-${TAG}-${TARGET}"
+          mkdir -p "staging/${name}"
+          cp "trading/hl-signer-desktop/target/${TARGET}/release/hl-signer-desktop" "staging/${name}/"
+          [ -f trading/hl-signer-desktop/INSTALL.md ] && cp trading/hl-signer-desktop/INSTALL.md "staging/${name}/" || true
+          tar -C staging -czf "dist/${name}.tar.gz" "${name}"
+
+
+      - name: Package (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $Env:TAG
+          $target = $Env:TARGET
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+
+          # hl-signer-desktop
+          $name = "hl-signer-desktop-$tag-$target"
+          $stage = "staging/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "trading/hl-signer-desktop/target/$target/release/hl-signer-desktop.exe" $stage
+          if (Test-Path "trading/hl-signer-desktop/INSTALL.md") { Copy-Item "trading/hl-signer-desktop/INSTALL.md" $stage }
+          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
+
+
+      - name: Checksum (unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -- *.tar.gz > SHASUMS256.txt
+          else
+            shasum -a 256 -- *.tar.gz > SHASUMS256.txt
+          fi
+          cat SHASUMS256.txt
+
+      - name: Checksum (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem -Filter *.zip | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Out-File -Encoding ascii SHASUMS256.txt
+          Get-Content SHASUMS256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signers-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?-signer$'; then
+            echo "ERROR: tag '$tag' does not match v<MAJOR>.<MINOR>.<PATCH>[-prerelease]-signer" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: signers-*
+          merge-multiple: false
+
+      - name: Flatten + aggregate checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          : > SHASUMS256.txt
+          # Move every archive to release/ and combine the per-target
+          # SHASUMS256.txt files into a single SHASUMS256.txt.
+          for dir in artifacts/signers-*; do
+            for f in "$dir"/*; do
+              name="$(basename "$f")"
+              case "$name" in
+                SHASUMS256.txt) cat "$f" >> SHASUMS256.txt ;;
+                *) mv "$f" release/ ;;
+              esac
+            done
+          done
+          sort -u SHASUMS256.txt -o SHASUMS256.txt
+          cp SHASUMS256.txt release/SHASUMS256.txt
+          ls -la release
+
+      - name: Compose release body
+        id: body
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'DegenBox signer binaries %s.\n\n' "$TAG"
+            printf '## Install\n\n'
+            printf '```sh\n'
+            printf 'curl -fsSL https://degenbox.app/install-signer.sh | sh\n'
+            printf '```\n\n'
+            printf 'Or download the archive for your platform below, extract, and add the binary to your PATH.\n\n'
+            printf '## Checksums (sha256)\n\n'
+            printf '```\n'
+            cat SHASUMS256.txt
+            printf '```\n'
+          } > BODY.md
+          echo "path=BODY.md" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: ${{ steps.body.outputs.path }}
+          files: |
+            release/*
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
