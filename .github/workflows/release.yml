@@ -99,15 +99,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            trading/hl-signer-desktop -> target
+            . -> target
           key: ${{ matrix.target }}
 
       - name: Build hl-signer-desktop
         shell: bash
-        working-directory: trading/hl-signer-desktop
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked --bin hl-signer-desktop --target "$TARGET"
+        run: cargo build --release --locked -p hl-signer-desktop --target "$TARGET"
 
 
       - name: Strip debug symbols (unix)
@@ -116,7 +115,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          strip "trading/hl-signer-desktop/target/$TARGET/release/hl-signer-desktop" || true
+          strip "target/$TARGET/release/hl-signer-desktop" || true
 
       - name: Package (unix)
         if: matrix.os != 'windows'
@@ -131,7 +130,7 @@ jobs:
           # hl-signer-desktop
           name="hl-signer-desktop-${TAG}-${TARGET}"
           mkdir -p "staging/${name}"
-          cp "trading/hl-signer-desktop/target/${TARGET}/release/hl-signer-desktop" "staging/${name}/"
+          cp "target/${TARGET}/release/hl-signer-desktop" "staging/${name}/"
           [ -f trading/hl-signer-desktop/INSTALL.md ] && cp trading/hl-signer-desktop/INSTALL.md "staging/${name}/" || true
           tar -C staging -czf "dist/${name}.tar.gz" "${name}"
 
@@ -153,7 +152,7 @@ jobs:
           $name = "hl-signer-desktop-$tag-$target"
           $stage = "staging/$name"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "trading/hl-signer-desktop/target/$target/release/hl-signer-desktop.exe" $stage
+          Copy-Item "target/$target/release/hl-signer-desktop.exe" $stage
           if (Test-Path "trading/hl-signer-desktop/INSTALL.md") { Copy-Item "trading/hl-signer-desktop/INSTALL.md" $stage }
           Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
 
