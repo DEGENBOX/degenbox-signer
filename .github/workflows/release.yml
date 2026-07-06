@@ -3,24 +3,49 @@ name: Release Signers
 # Builds and publishes pre-compiled signer binaries for end users so
 # they no longer need to `cargo install` from source.
 #
-# Triggered by pushing a tag like `v0.1.0-signer`. The matrix builds
-# four target platforms in parallel for both signer binaries
-# (`hl-signer-desktop` for Hyperliquid + `degenbox-signer-cli` for
-# Solana), packages them, computes sha256, then a final job creates a
-# GitHub Release with all artifacts + a SHASUMS256.txt body.
+# Triggered by pushing a tag like `v0.1.0-signer` (mint the next one with
+# `scripts/next-signer-version.sh`). The matrix builds four target
+# platforms in parallel for both signer binaries (`hl-signer-desktop`,
+# the unified HL + Solana CLI, plus the DEPRECATED Solana-only
+# `degenbox-signer-cli`), packages them, computes sha256, then a final
+# job creates a GitHub Release with all artifacts + a SHASUMS256.txt
+# body. The Tauri desktop app releases separately under `v*-app` tags
+# via release-signer-app.yml.
 #
-# TODO: codesign + notarize macOS builds once Apple Developer Program
-# is set up — until then macOS users see a "cannot verify developer"
-# warning on first run and must allow it in System Settings > Privacy
-# & Security.
+# OpenSSL: since the CLI unification, hl-signer-desktop links
+# openssl-sys on EVERY platform (signer-core → solana-sdk →
+# solana-secp256r1-program). macOS runners resolve it via the
+# preinstalled Homebrew openssl@3, Linux via libssl-dev (installed
+# explicitly below), Windows via the vendored-openssl build in the
+# crate's `[target.'cfg(windows)'.dependencies]` (needs Perl — the
+# windows-2022 image ships Strawberry Perl + NASM).
+#
+# Cargo.lock: both crates build with --locked. Every dep or version
+# bump MUST commit the regenerated trading/<crate>/Cargo.lock in the
+# same commit as the tag target — stale locks are the #1 historical
+# cause of red releases, so a preflight step fails fast with a clear
+# message.
+#
+# Code-signing is wired but SECRET-GATED so the build never breaks when
+# the certs aren't configured yet:
+#   * macOS  — Developer-ID codesign (hardened runtime + timestamp) +
+#     notarytool submit. Runs only when APPLE_CERT_P12 + APPLE_NOTARY_KEY
+#     secrets are present (see `HAS_APPLE` below). Without them the binary
+#     ships unsigned and macOS shows the "cannot verify developer" prompt.
+#   * Windows — Authenticode signtool. Runs only when WINDOWS_CERT_PFX is
+#     present (`HAS_WINDOWS`). The hl-signer-desktop .exe ships the full
+#     unified HL + Solana stack (openssl vendored on this target); only
+#     the DEPRECATED Solana-only signer-cli is skipped on Windows.
+# Required secrets to enable signing:
+#   APPLE_CERT_P12 (base64 .p12), APPLE_CERT_PASSWORD,
+#   APPLE_SIGNING_IDENTITY ("Developer ID Application: …"),
+#   APPLE_NOTARY_KEY (base64 .p8), APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID,
+#   WINDOWS_CERT_PFX (base64 .pfx), WINDOWS_CERT_PASSWORD.
 #
 # TODO: Windows MSI installer (currently we ship a plain .zip with the
 # .exe). Users have to unzip + add to PATH manually.
 
 on:
-  push:
-    tags:
-      - "v*-signer"
   workflow_dispatch:
     inputs:
       tag:
@@ -38,6 +63,12 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    # Derive "are signing certs configured?" once. Secrets can't be read
+    # in step `if:` directly, so we project them to booleans here and gate
+    # the signing steps on these — keeping the build green when unset.
+    env:
+      HAS_APPLE: ${{ secrets.APPLE_CERT_P12 != '' && secrets.APPLE_NOTARY_KEY != '' }}
+      HAS_WINDOWS: ${{ secrets.WINDOWS_CERT_PFX != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,10 +90,13 @@ jobs:
             os: linux
             ext: tar.gz
             build_solana: true
-          # Windows: hl-signer-desktop only — it uses rustls, no OpenSSL.
-          # signer-cli (Solana) is skipped here; openssl-sys on MSVC needs
-          # strawberry-perl + vendored openssl. Re-enable when signer-cli
-          # switches to rustls.
+          # Windows: hl-signer-desktop only. `build_solana: false` now means
+          # "skip the DEPRECATED standalone signer-cli" — Windows users get
+          # the full Solana stack inside hl-signer-desktop.exe itself, which
+          # builds openssl-sys from source via its windows-only
+          # `openssl = { vendored }` dep (Strawberry Perl + NASM are on the
+          # windows-2022 image). signer-cli stays unix-only until it dies
+          # with the browser extension; not worth porting.
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
             os: windows
@@ -95,9 +129,31 @@ jobs:
           ver="${ver%-signer}"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
+      # Fail fast (seconds, on every leg) when a Cargo.lock wasn't committed
+      # with the version/dep bump — historically the most common red-release
+      # cause; the --locked builds below would otherwise burn minutes first.
+      - name: Preflight Cargo.lock in sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in trading/hl-signer-desktop trading/signer-desktop; do
+            (cd "$crate" && cargo metadata --locked --format-version 1 >/dev/null) \
+              || { echo "::error::$crate/Cargo.lock is stale — regenerate it (cargo update -w in $crate) and commit it together with the bump"; exit 1; }
+          done
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # hl-signer-desktop links openssl-sys on Linux since the Solana
+      # unification (no vendored build here — distro libssl is fine for a
+      # gnu-target binary). The runner image usually ships libssl-dev, but
+      # install explicitly so an image update can't silently break releases.
+      - name: Install OpenSSL headers (linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
       # Each signer crate is its own workspace (independent Cargo.lock).
       # Cache per crate + target so re-tagging is fast.
@@ -113,6 +169,35 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked -p hl-signer-desktop --target "$TARGET"
 
+      # Guard: the binary MUST report the same version as the release tag.
+      # Every matrix runner is native to its target, so we can just run it.
+      # A mismatch (e.g. a stale build cache baking an old CARGO_PKG_VERSION)
+      # fails the whole release instead of shipping a wrong-version binary
+      # that still passes sha256 verification downstream.
+      - name: Assert hl-signer-desktop version == tag (unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXPECTED: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          actual="$("target/$TARGET/release/hl-signer-desktop" --version | awk '{print $NF}')"
+          echo "binary=$actual tag=$EXPECTED"
+          [ "$actual" = "$EXPECTED" ] || { echo "::error::hl-signer-desktop version $actual != tag $EXPECTED — refusing to release"; exit 1; }
+
+      - name: Assert hl-signer-desktop version == tag (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          EXPECTED: ${{ steps.ver.outputs.version }}
+        run: |
+          $out = & "target/$env:TARGET/release/hl-signer-desktop.exe" --version
+          $actual = ($out -split '\s+')[-1]
+          Write-Host "binary=$actual tag=$env:EXPECTED"
+          if ($actual -ne $env:EXPECTED) { Write-Error "hl-signer-desktop version $actual != tag $env:EXPECTED — refusing to release"; exit 1 }
+
 
       - name: Strip debug symbols (unix)
         if: matrix.os != 'windows'
@@ -121,6 +206,66 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           strip "target/$TARGET/release/hl-signer-desktop" || true
+
+      - name: Codesign + notarize (macOS)
+        if: matrix.os == 'macos' && env.HAS_APPLE == 'true'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # 1. Import the Developer-ID cert into a throwaway keychain.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$keychain" >/dev/null
+          # 2. Sign each binary with the hardened runtime + secure timestamp.
+          printf '%s' "$APPLE_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          for bin in \
+            "target/${TARGET}/release/hl-signer-desktop" \
+            "trading/signer-desktop/target/${TARGET}/release/signer-cli"; do
+            [ -f "$bin" ] || continue
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            # 3. Notarize the signed binary (zip container). Bare CLI tools
+            #    can't be stapled, so Gatekeeper verifies the ticket online;
+            #    --wait fails the job if Apple rejects the binary.
+            ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+              --key "$RUNNER_TEMP/notary.p8" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" \
+              --wait
+          done
+
+      - name: Sign (windows)
+        if: matrix.os == 'windows' && env.HAS_WINDOWS == 'true'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfx = Join-Path $Env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($Env:WINDOWS_CERT_PFX))
+          $bin = "target/$($Env:TARGET)/release/hl-signer-desktop.exe"
+          # signtool ships with the Windows SDK on the windows-2022 image.
+          & signtool sign /f $pfx /p $Env:WINDOWS_CERT_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $bin
+          & signtool verify /pa $bin
 
       - name: Package (unix)
         if: matrix.os != 'windows'
@@ -159,7 +304,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/$target/release/hl-signer-desktop.exe" $stage
           if (Test-Path "trading/hl-signer-desktop/INSTALL.md") { Copy-Item "trading/hl-signer-desktop/INSTALL.md" $stage }
-          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
+          # Zip the CONTENTS (not the folder itself) so "Extract All" produces
+          # a single flat folder — no double-nesting on Windows.
+          Push-Location $stage
+          Compress-Archive -Path * -DestinationPath "../../dist/$name.zip" -Force
+          Pop-Location
 
       - name: Checksum (unix)
         if: matrix.os != 'windows'

@@ -25,7 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::config::{self, Config};
+use crate::config::{self};
 use crate::keystore;
 use crate::server;
 
@@ -38,6 +38,7 @@ pub enum Step {
     Welcome,
     KeySource,
     Backend,
+    Account,
     Register,
     Done,
 }
@@ -69,6 +70,14 @@ struct State {
     passphrase: String,
     confirm_passphrase: String,
     pass_focus: bool, // false = passphrase field, true = confirm field
+    /// HL master account (`0x…`) this signer pairs to. Collected in the
+    /// Account step; REQUIRED for in-TUI registration (the gateway only
+    /// delivers instructions to a paired signer).
+    account_address: String,
+    /// Client name shown in the multi-client dashboard.
+    client_name: String,
+    /// Account step focus: false = account field, true = name field.
+    account_focus_name: bool,
     register_token: String,
     register_status: RegisterStatus,
     error: Option<String>,
@@ -103,6 +112,17 @@ pub async fn run(
         passphrase: String::new(),
         confirm_passphrase: String::new(),
         pass_focus: false,
+        account_address: cfg.account_address.clone().unwrap_or_default(),
+        client_name: cfg.client_name.clone().unwrap_or_else(|| {
+            // Default the client name to the bot directory name so the hub
+            // dashboard isn't full of "client_2" rows.
+            cfg_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default".into())
+        }),
+        account_focus_name: false,
         register_token: String::new(),
         register_status: RegisterStatus::Idle,
         error: None,
@@ -123,6 +143,17 @@ pub async fn run(
                     WizardAction::Quit => return Ok(WizardOutcome::Quit),
                     WizardAction::Done => return Ok(WizardOutcome::Completed),
                     WizardAction::Continue => {}
+                    WizardAction::Register => {
+                        // Paint the in-flight spinner BEFORE the blocking
+                        // network call so the UI shows progress, not a freeze.
+                        terminal.draw(|f| render(f, &state))?;
+                        match attempt_register(&mut state).await {
+                            Ok(()) => state.step = Step::Done,
+                            Err(e) => {
+                                state.register_status = RegisterStatus::Failed(e.to_string());
+                            }
+                        }
+                    }
                 }
             }
             Some(TuiEvent::Tick) => {}
@@ -136,6 +167,10 @@ enum WizardAction {
     Continue,
     Quit,
     Done,
+    /// The user submitted the registration token. The caller draws an
+    /// in-flight frame (so the spinner paints) BEFORE awaiting the
+    /// network round-trip, which would otherwise freeze the UI 2-3s.
+    Register,
 }
 
 async fn handle_key(state: &mut State, code: KeyCode) -> WizardAction {
@@ -231,10 +266,58 @@ async fn handle_key(state: &mut State, code: KeyCode) -> WizardAction {
                     let mut cfg = config::load(&state.cfg_path).unwrap_or_default();
                     cfg.agent_address = Some(addr);
                     let _ = config::save(&state.cfg_path, &cfg);
-                    state.step = Step::Register;
+                    state.step = Step::Account;
                 }
                 Err(e) => state.error = Some(e.to_string()),
             }
+            WizardAction::Continue
+        }
+        // ─── Account step: collect the HL master wallet + client name ───
+        (Step::Account, KeyCode::Up | KeyCode::Down | KeyCode::Tab) => {
+            state.account_focus_name = !state.account_focus_name;
+            WizardAction::Continue
+        }
+        (Step::Account, KeyCode::Char(c)) => {
+            if state.account_focus_name {
+                state.client_name.push(c);
+            } else if c.is_ascii_hexdigit() || c == 'x' || c == 'X' {
+                // Account field only accepts hex + the 0x marker.
+                state.account_address.push(c);
+            }
+            WizardAction::Continue
+        }
+        (Step::Account, KeyCode::Backspace) => {
+            if state.account_focus_name {
+                state.client_name.pop();
+            } else {
+                state.account_address.pop();
+            }
+            WizardAction::Continue
+        }
+        (Step::Account, KeyCode::Enter) => {
+            let agent = keystore::peek_address(&state.ks_path).ok();
+            match validate_account(&state.account_address, agent.as_deref()) {
+                Ok(normalized) => {
+                    state.account_address = normalized.clone();
+                    let mut cfg = config::load(&state.cfg_path).unwrap_or_default();
+                    cfg.account_address = Some(normalized);
+                    let name = state.client_name.trim();
+                    if !name.is_empty() {
+                        cfg.client_name = Some(name.to_string());
+                    }
+                    if let Err(e) = config::save(&state.cfg_path, &cfg) {
+                        state.error = Some(format!("save config: {e}"));
+                    } else {
+                        state.step = Step::Register;
+                    }
+                }
+                Err(e) => state.error = Some(e),
+            }
+            WizardAction::Continue
+        }
+        (Step::Register, KeyCode::Char('s')) => {
+            // Skip — register later via the Wallet tab / CLI subcommand.
+            state.step = Step::Done;
             WizardAction::Continue
         }
         (Step::Register, KeyCode::Char(c)) => {
@@ -248,24 +331,45 @@ async fn handle_key(state: &mut State, code: KeyCode) -> WizardAction {
             WizardAction::Continue
         }
         (Step::Register, KeyCode::Enter) => {
-            match attempt_register(state).await {
-                Ok(()) => {
-                    state.step = Step::Done;
-                }
-                Err(e) => {
-                    state.register_status = RegisterStatus::Failed(e.to_string());
-                }
+            // Flip to in-flight here; the caller paints the spinner frame
+            // and then drives the actual network call so the UI doesn't
+            // freeze during the round-trip.
+            if state.register_token.trim().is_empty() {
+                state.error = Some("registration token required.".into());
+                return WizardAction::Continue;
             }
-            WizardAction::Continue
-        }
-        (Step::Register, KeyCode::Char('s')) => {
-            // Skip — register later via the Wallet tab / CLI subcommand.
-            state.step = Step::Done;
-            WizardAction::Continue
+            state.register_status = RegisterStatus::InFlight;
+            WizardAction::Register
         }
         (Step::Done, KeyCode::Enter) => WizardAction::Done,
         _ => WizardAction::Continue,
     }
+}
+
+/// Validate + normalize an HL master-account address. Must be a
+/// 0x-prefixed 20-byte (40 hex char) EVM address, and MUST NOT equal the
+/// agent address (the agent is sandboxed + holds no positions). Returns
+/// the lowercased canonical form.
+fn validate_account(raw: &str, agent: Option<&str>) -> Result<String, String> {
+    let a = raw.trim().to_ascii_lowercase();
+    if a.is_empty() {
+        return Err("HL master wallet required — paste your 0x… account address.".into());
+    }
+    if !a.starts_with("0x") || a.len() != 42 || !a[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "must be a 0x-prefixed 20-byte hex address (40 hex chars); got {} chars",
+            a.len()
+        ));
+    }
+    if let Some(agent) = agent {
+        if a.eq_ignore_ascii_case(agent) {
+            return Err(
+                "that's the AGENT address — paste your HL MASTER wallet (the one that holds funds)."
+                    .into(),
+            );
+        }
+    }
+    Ok(a)
 }
 
 fn generate_into(state: &mut State) {
@@ -287,11 +391,28 @@ async fn attempt_register(state: &mut State) -> Result<()> {
 
     let is_one_shot = token.len() == 32 && token.chars().all(|c| c.is_ascii_hexdigit());
     let resp = if is_one_shot {
+        // The HL master wallet is required to pair (the gateway only delivers
+        // instructions when `paired_with_account` is set). The TUI wizard
+        // doesn't collect it yet, so steer to the CLI `register` command
+        // (which prompts/accepts `--account`) instead of registering a
+        // signer that shows "Ready" but silently never trades.
+        let paired_with_account = cfg.account_address.clone().ok_or_else(|| {
+            anyhow!(
+                "your HL master wallet is required to pair — finish with the CLI: \
+                 `hl-signer-desktop register --token {token} --account 0x…` (your HL main \
+                 account, not the agent). Without it no trades are ever delivered."
+            )
+        })?;
         let req = server::RedeemRegistrationReq {
             token,
             agent_address: agent_address.clone(),
             client_version: Some(format!("hl-signer-desktop {}", env!("CARGO_PKG_VERSION"))),
             host_id: cfg.host_id.clone(),
+            paired_with_account: Some(paired_with_account),
+            // The TUI onboarding path doesn't drive an interactive TOTP prompt;
+            // 2FA-enrolled users are steered to the CLI `register` command,
+            // which handles the 428 challenge. None keeps the wire shape valid.
+            totp_code: None,
         };
         server::ServerClient::redeem_registration(&state.server_url, &req)
             .await
@@ -304,11 +425,14 @@ async fn attempt_register(state: &mut State) -> Result<()> {
                 agent_address: agent_address.clone(),
                 client_version: Some(format!("hl-signer-desktop {}", env!("CARGO_PKG_VERSION"))),
                 host_id: cfg.host_id.clone(),
+                // Declare the pairing when the config already carries the
+                // master account — None never wipes an existing pairing.
+                paired_with_account: cfg.account_address.clone(),
             })
             .await
             .map_err(|e| anyhow!("{e}"))?
     };
-    let mut cfg = config::load(&state.cfg_path).unwrap_or(Config::default());
+    let mut cfg = config::load(&state.cfg_path).unwrap_or_default();
     cfg.agent_address = Some(resp.agent_address.clone());
     if !is_one_shot {
         cfg.api_token = Some(state.register_token.trim().to_string());
@@ -353,14 +477,16 @@ fn render_progress(frame: &mut Frame<'_>, area: Rect, state: &State) {
         ("1 Welcome", Step::Welcome),
         ("2 Key", Step::KeySource),
         ("3 Backend", Step::Backend),
-        ("4 Register", Step::Register),
+        ("4 Account", Step::Account),
+        ("5 Register", Step::Register),
     ];
     let current_idx = match state.step {
         Step::Welcome => 0,
         Step::KeySource => 1,
         Step::Backend => 2,
-        Step::Register => 3,
-        Step::Done => 4,
+        Step::Account => 3,
+        Step::Register => 4,
+        Step::Done => 5,
     };
     let mut spans = vec![Span::raw(" ")];
     for (i, (label, _)) in steps.iter().enumerate() {
@@ -371,7 +497,7 @@ fn render_progress(frame: &mut Frame<'_>, area: Rect, state: &State) {
         } else {
             state.theme.muted()
         };
-        spans.push(Span::styled(format!(" {} ", label), style));
+        spans.push(Span::styled(format!(" {label} "), style));
         if i + 1 < steps.len() {
             spans.push(Span::styled(" \u{203A} ", state.theme.muted()));
         }
@@ -384,6 +510,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, state: &State) {
         Step::Welcome => render_welcome(state),
         Step::KeySource => render_key_source(state),
         Step::Backend => render_backend(state),
+        Step::Account => render_account(state),
         Step::Register => render_register(state),
         Step::Done => render_done(state),
     };
@@ -391,6 +518,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, state: &State) {
         Step::Welcome => "About",
         Step::KeySource => "Provide a key",
         Step::Backend => "Encrypt the keystore",
+        Step::Account => "Link your Hyperliquid account",
         Step::Register => "Register with the DegenBox server",
         Step::Done => "Ready",
     };
@@ -409,7 +537,18 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, state: &State) {
 }
 
 fn render_welcome(state: &State) -> Vec<Line<'static>> {
-    vec![
+    let mut lines = vec![Line::from("")];
+    for l in crate::tui::logo::LOGO {
+        lines.push(Line::from(Span::styled(
+            *l,
+            state.theme.accent().add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("    {}", crate::tui::logo::TAGLINE),
+        state.theme.muted(),
+    )));
+    lines.extend(vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Welcome to the DegenBox HL Signer.",
@@ -438,7 +577,8 @@ fn render_welcome(state: &State) -> Vec<Line<'static>> {
             "  Press Enter to continue, Esc to quit.",
             state.theme.muted(),
         )),
-    ]
+    ]);
+    lines
 }
 
 fn render_key_source(state: &State) -> Vec<Line<'static>> {
@@ -574,14 +714,64 @@ fn render_backend(state: &State) -> Vec<Line<'static>> {
     ]
 }
 
+fn render_account(state: &State) -> Vec<Line<'static>> {
+    let acct_label = if state.account_focus_name { " " } else { ">" };
+    let name_label = if state.account_focus_name { ">" } else { " " };
+    let acct_display = if state.account_address.is_empty() {
+        Span::styled("0x… (paste your HL master wallet)", state.theme.muted())
+    } else {
+        Span::styled(
+            state.account_address.clone(),
+            state.theme.neutral().add_modifier(Modifier::BOLD),
+        )
+    };
+    vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Your HL MASTER wallet — the 0x… account that holds your funds.",
+            state.theme.neutral(),
+        )),
+        Line::from(Span::styled(
+            "  This is REQUIRED: the server only delivers trades to a paired",
+            state.theme.neutral(),
+        )),
+        Line::from(Span::styled(
+            "  signer. It is NOT the agent address you imported.",
+            state.theme.warn(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(acct_label.to_string(), state.theme.accent()),
+            Span::raw(" account  "),
+            acct_display,
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(name_label.to_string(), state.theme.accent()),
+            Span::raw(" name     "),
+            Span::styled(state.client_name.clone(), state.theme.neutral()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Up/Down to switch field, Enter to continue.",
+            state.theme.muted(),
+        )),
+    ]
+}
+
 fn render_register(state: &State) -> Vec<Line<'static>> {
     let token_view = state.register_token.clone();
     let status_line = match &state.register_status {
         RegisterStatus::Idle => Line::from(""),
         RegisterStatus::InFlight => Line::from(vec![
             Span::raw("  "),
-            Span::styled("\u{2026} talking to ", state.theme.muted()),
+            Span::styled(
+                "\u{2807} registering with ",
+                state.theme.accent().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(state.server_url.clone(), state.theme.neutral()),
+            Span::styled("  (this can take a few seconds)", state.theme.muted()),
         ]),
         RegisterStatus::Ok { user_id, agent } => Line::from(vec![
             Span::raw("  "),
@@ -645,7 +835,7 @@ fn render_done(state: &State) -> Vec<Line<'static>> {
             state.theme.neutral(),
         )),
         Line::from(Span::styled(
-            "  daemon, watch live orders, and inspect the keystore.",
+            "  bot, watch live orders, and inspect the keystore.",
             state.theme.neutral(),
         )),
         Line::from(""),
@@ -686,6 +876,9 @@ mod tests {
             passphrase: String::new(),
             confirm_passphrase: String::new(),
             pass_focus: false,
+            account_address: String::new(),
+            client_name: "test-client".into(),
+            account_focus_name: false,
             register_token: String::new(),
             register_status: RegisterStatus::Idle,
             error: None,
@@ -704,6 +897,7 @@ mod tests {
             Step::Welcome,
             Step::KeySource,
             Step::Backend,
+            Step::Account,
             Step::Register,
             Step::Done,
         ] {

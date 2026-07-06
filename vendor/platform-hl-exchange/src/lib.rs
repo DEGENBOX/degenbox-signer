@@ -31,6 +31,7 @@ pub mod actions;
 pub mod client;
 pub mod cloid;
 pub mod signer;
+pub mod userfills;
 
 pub use actions::{
     ApproveAgentAction, CancelAction, CancelByCloidAction, CancelByCloidSpec, CancelSpec, Grouping,
@@ -43,6 +44,7 @@ pub use client::{
 };
 pub use cloid::new_cloid;
 pub use signer::{AgentSigner, Network, SignerError};
+pub use userfills::{parse_user_fills, sum_closed_pnl_for_oid, UserFill};
 
 /// Estimated USD value for a market order given a quoted price. Used
 /// by callers to pre-check size against per-user risk gates *before*

@@ -1,9 +1,9 @@
 [package]
 name = "hl-signer-desktop"
-version = "0.1.0"
+version = "0.1.11"
 edition = "2021"
 license = "MIT"
-description = "Local desktop signer for DegenBox Hyperliquid trading — holds an encrypted API agent key, polls the server for queued instructions, signs locally, POSTs to HL."
+description = "DegenBox unified local desktop signer — Hyperliquid perps (encrypted API agent key, poll/sign/report daemon) + Solana memecoins (sell/copy execution streams, :5829 signer-protocol daemon), all keys local."
 publish = false
 
 [[bin]]
@@ -11,9 +11,17 @@ name = "hl-signer-desktop"
 path = "src/main.rs"
 
 [dependencies]
-# HL EIP-712 signing + /exchange transport — same library the server
-# used to use before the desktop-signer pivot. Pinned to the workspace
-# version so the wire shape is identical end-to-end.
+# The shared signer implementation: canonical HL stack (keystore /
+# config / server / info / signing / exec-state / audit / daemon, all
+# behind `hl-exec`) + the full Solana stack (keystore, BotEngine,
+# sell/copy streams) + the 127.0.0.1:5829 signer-protocol daemon
+# (`localhost-daemon`) the web app probes for a desktop signer.
+degenbox-signer-core = { path = "../signer-core", features = ["hl-exec", "localhost-daemon"] }
+
+# HL EIP-712 signing + /exchange transport — used directly by the
+# offline `panic` kill-switch (cancel-all + flatten without a server).
+# The daemon path now reaches it through signer-core; pinning the same
+# path-dep keeps the wire shape identical end-to-end.
 platform-hl-exchange = { path = "../../vendor/platform-hl-exchange" }
 
 clap = { version = "4", features = ["derive"] }
@@ -26,34 +34,34 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 hex = "0.4"
 rust_decimal = { version = "1.36", features = ["serde"] }
-async-trait = "0.1"
 
-# Keystore envelope — same algorithm as the legacy Go bot so users
-# can migrate without re-pasting their private key.
-# Argon2id (time=3, memory=64MB, threads=4) + AES-256-GCM.
-argon2 = { version = "0.5", default-features = false, features = ["std", "alloc"] }
-aes-gcm = "0.10"
+# Multi-wallet vault (shared with the desktop app): base58 secret paste
+# for `clients import`, base64url for the Discord PKCE login, zeroize
+# for in-memory seed scrubbing.
+bs58 = "0.5"
+base64 = "0.22"
+zeroize = "1"
+
+# Fresh HL agent-key generation in the TUI setup wizard.
 rand_core = { version = "0.6", features = ["getrandom"] }
-# Address derivation from the secp256k1 secret — same path as the
-# legacy bot (keccak[12..] of the uncompressed pubkey).
-k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
-sha3 = "0.10"
 
-# HTTP — talks to BOTH the DegenBox server (register/poll/result) and
-# Hyperliquid's `/exchange` endpoint (via platform_hl_exchange).
+# HTTP — talks to BOTH the DegenBox server and Hyperliquid `/info`
+# (agent-key sanity probe in `setup`).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 
 # NATS subscriber for sub-second push from the server. Optional — the
 # polling loop is the source of truth; NATS is just a low-latency
-# nudge that the loop should poll right now.
+# nudge that the loop should poll right now. Deliberately kept HERE
+# (not in signer-core) so the shared crate's dep surface stays small;
+# the daemon core takes the nudge through a plain mpsc channel.
 async-nats = "0.38"
 futures = "0.3"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Atomic writes to the keystore file so a crash mid-write doesn't
-# corrupt the user's only copy of their (encrypted) private key.
+# Atomic writes for config files so a crash mid-write doesn't corrupt
+# the user's state.
 tempfile = "3"
 
 # Self-update flow: verify downloaded binaries against the release's
@@ -68,6 +76,16 @@ tar = "0.4"
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
+
+# Windows-only: flip the console to UTF-8 + enable virtual-terminal processing
+# at startup so our ANSI colors + Unicode glyphs (›, ✓, ≥, —) render in classic
+# conhost / PowerShell instead of mojibake. No-op on other platforms.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
+# solana-secp256r1-program (via signer-core → solana-sdk) pulls openssl.
+# Windows CI runners have no system OpenSSL, so vendor it (build from
+# source) on that target only — same workaround signer-app already uses.
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

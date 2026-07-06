@@ -149,13 +149,13 @@ pub fn wordmark() -> String {
         return format!(
             "\n\
              ::    ::  DegenBox HL Signer  v{version}\n\
-             ::    ::  keys stay local · self-custody\n",
+             ::    ::\n",
         );
     }
     format!(
         "\n\
          {ACCENT}{BOLD}::    ::{RESET}  {ACCENT}{BOLD}DegenBox HL Signer{RESET}  {MUTED}v{version}{RESET}\n\
-         {ACCENT}{BOLD}::    ::{RESET}  {MUTED}keys stay local · self-custody{RESET}\n",
+         {ACCENT}{BOLD}::    ::{RESET}\n",
     )
 }
 
@@ -214,6 +214,6 @@ mod tests {
         let w = wordmark();
         assert!(w.contains("DegenBox HL Signer"));
         assert!(w.contains(env!("CARGO_PKG_VERSION")));
-        assert!(w.contains("keys stay local"));
+        assert!(w.contains("::    ::"));
     }
 }

@@ -180,14 +180,10 @@ pub async fn run_self_update() -> Result<()> {
         .ok_or_else(|| anyhow!("release is missing SHASUMS256.txt — refusing to install"))?;
     let shasums_body = download_text(&shasums.browser_download_url).await?;
     let expected = parse_shasum(&shasums_body, &archive_name)
-        .ok_or_else(|| anyhow!("no sha256 line for `{}` in SHASUMS256.txt", archive_name))?;
+        .ok_or_else(|| anyhow!("no sha256 line for `{archive_name}` in SHASUMS256.txt"))?;
     let actual = sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(&expected) {
-        return Err(anyhow!(
-            "sha256 mismatch: expected {} got {}",
-            expected,
-            actual
-        ));
+        return Err(anyhow!("sha256 mismatch: expected {expected} got {actual}"));
     }
     println!(
         "  {} {} ({})",
@@ -329,7 +325,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(64);
     for b in digest {
         use std::fmt::Write;
-        let _ = write!(out, "{:02x}", b);
+        let _ = write!(out, "{b:02x}");
     }
     out
 }

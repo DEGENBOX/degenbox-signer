@@ -18,9 +18,8 @@ const ROW_LABELS: &[&str] = &[
     "Log level",
     "Paper mode",
     "Auto-update",
-    "Max clients",
 ];
-const NUM_ROWS: usize = 5;
+const NUM_ROWS: usize = 4;
 
 pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let s = &app.settings;
@@ -29,7 +28,6 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         s.log_level.clone(),
         bool_str(s.paper_mode),
         bool_str(s.auto_update),
-        s.max_clients.clone(),
     ];
     let max_label = ROW_LABELS.iter().map(|l| l.len()).max().unwrap_or(0);
     let mut lines: Vec<Line> = Vec::with_capacity(NUM_ROWS + 4);
@@ -43,9 +41,14 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Style::default()
         };
         let val_style = if focused {
-            app.theme
+            let mut style = app
+                .theme
                 .neutral()
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            if s.is_editing {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            style
         } else {
             app.theme.neutral()
         };
@@ -53,22 +56,71 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Span::raw("  "),
             Span::styled(arrow.to_string(), arrow_style),
             Span::raw(" "),
-            Span::styled(
-                format!("{:width$}", label, width = max_label),
-                app.theme.muted(),
-            ),
+            Span::styled(format!("{label:max_label$}"), app.theme.muted()),
             Span::raw("   "),
-            Span::styled(row_values[i].clone(), val_style),
+            Span::styled(
+                if focused && s.is_editing {
+                    format!("{}█", row_values[i])
+                } else {
+                    row_values[i].clone()
+                },
+                val_style,
+            ),
         ]));
     }
     lines.push(Line::from(""));
+    // Paper-mode is a REAL dry-run: when on, the signer reports `paper`
+    // and NEVER POSTs to HL. Spell that out so it can't be mistaken for a
+    // cosmetic toggle.
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            "Up/Down to focus, Left/Right or Space to toggle, type to edit numbers/strings, [s] save.",
+            if s.paper_mode {
+                "Paper mode ON — dry run: instructions are acked but NOT sent to HL."
+            } else {
+                "Paper mode OFF — LIVE: instructions are signed and sent to Hyperliquid."
+            },
+            if s.paper_mode {
+                app.theme.warn()
+            } else {
+                app.theme.muted()
+            },
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            if s.is_editing {
+                "Type to edit, [Enter] or [Esc] to confirm."
+            } else {
+                "Up/Down to focus, [Enter] to edit values, [Space] to toggle, [s] to save."
+            },
             app.theme.muted(),
         ),
     ]));
+
+    // Add space and then the "Create New Client" button
+    lines.push(Line::from(""));
+    let btn_focused = s.focus_row == NUM_ROWS;
+    let btn_style = if btn_focused {
+        app.theme
+            .accent()
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        app.theme.neutral().add_modifier(Modifier::BOLD)
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            if btn_focused {
+                "> [ Create New Client ]"
+            } else {
+                "  [ Create New Client ]"
+            },
+            btn_style,
+        ),
+    ]));
+
     let p = Paragraph::new(lines).block(widgets::panel("Settings", app.theme));
     frame.render_widget(p, area);
 }
@@ -83,6 +135,27 @@ fn bool_str(b: bool) -> String {
 
 pub fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> AppOutcome {
     let row = app.settings.focus_row;
+
+    if app.settings.is_editing {
+        match code {
+            KeyCode::Enter | KeyCode::Esc => {
+                app.settings.is_editing = false;
+                return AppOutcome::Continue;
+            }
+            KeyCode::Backspace => {
+                mutate_text(app, row, |s| {
+                    s.pop();
+                });
+                return AppOutcome::Continue;
+            }
+            KeyCode::Char(c) => {
+                mutate_text(app, row, |s| s.push(c));
+                return AppOutcome::Continue;
+            }
+            _ => return AppOutcome::Continue,
+        }
+    }
+
     match code {
         KeyCode::Up => {
             if app.settings.focus_row > 0 {
@@ -91,40 +164,69 @@ pub fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> AppOutco
             AppOutcome::Continue
         }
         KeyCode::Down => {
-            if app.settings.focus_row + 1 < NUM_ROWS {
+            if app.settings.focus_row < NUM_ROWS {
                 app.settings.focus_row += 1;
             }
             AppOutcome::Continue
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
-            toggle(app, row);
-            AppOutcome::Continue
-        }
-        KeyCode::Backspace => {
-            mutate_text(app, row, |s| {
-                s.pop();
-            });
-            AppOutcome::Continue
-        }
-        KeyCode::Char('s') => {
-            // Save to config. Today only `host_id` survives roundtrip —
-            // the runtime knobs (poll, log level, paper, max_clients)
-            // get re-read from the draft on next daemon start.
-            if let Err(e) = crate::config::save(&app.cfg_path, &app.cfg) {
-                app.modal = Some(crate::tui::app::Modal::Message {
-                    title: "Save failed".into(),
-                    body: e.to_string(),
-                });
-            } else {
-                app.modal = Some(crate::tui::app::Modal::Message {
-                    title: "Saved".into(),
-                    body: "Settings written to disk. Restart the daemon to pick up daemon-side changes.".into(),
-                });
+            if row < NUM_ROWS {
+                toggle(app, row);
             }
             AppOutcome::Continue
         }
-        KeyCode::Char(c) => {
-            mutate_text(app, row, |s| s.push(c));
+        KeyCode::Enter => {
+            if row == NUM_ROWS {
+                return AppOutcome::RunWizard;
+            } else if row == 0 || row == 1 {
+                // Edit poll interval or log level
+                app.settings.is_editing = true;
+            }
+            AppOutcome::Continue
+        }
+        KeyCode::Char('s') => {
+            // Fold the editable draft back into the active bot's config so
+            // the per-bot poll cadence actually persists (it used to be a
+            // dead "3"). paper_mode is applied on the next unlock/restart.
+            let poll = app
+                .settings
+                .poll_secs
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n >= 1);
+            let outcome = if let Some(bot) = app.bots.get_mut(app.active_bot_idx) {
+                if let Some(p) = poll {
+                    bot.cfg.poll_secs = p;
+                }
+                match crate::config::save(&bot.dir.join("hl-config.json"), &bot.cfg) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                Err("__no_client__".into())
+            };
+            match outcome {
+                Ok(()) => {
+                    app.modal = Some(crate::tui::app::Modal::Message {
+                        title: "Saved".into(),
+                        body: "Settings written. Poll cadence applies now; \
+                               paper-mode toggles on the next unlock/restart."
+                            .into(),
+                    });
+                }
+                Err(ref e) if e == "__no_client__" => {
+                    app.modal = Some(crate::tui::app::Modal::Message {
+                        title: "No client selected".into(),
+                        body: "Please create a new client first.".into(),
+                    });
+                }
+                Err(e) => {
+                    app.modal = Some(crate::tui::app::Modal::Message {
+                        title: "Save failed".into(),
+                        body: e,
+                    });
+                }
+            }
             AppOutcome::Continue
         }
         _ => AppOutcome::Continue,
@@ -143,7 +245,6 @@ fn mutate_text(app: &mut App, row: usize, f: impl FnOnce(&mut String)) {
     match row {
         0 => f(&mut app.settings.poll_secs),
         1 => f(&mut app.settings.log_level),
-        4 => f(&mut app.settings.max_clients),
         _ => {}
     }
 }
@@ -157,13 +258,16 @@ mod tests {
     use ratatui::Terminal;
 
     #[test]
-    fn arrow_down_moves_focus_until_last_row() {
+    fn arrow_down_moves_focus_until_create_client_button() {
         let mut app = App::for_test(Config::default(), RuntimeState::new());
         app.tab = Tab::Settings;
         for _ in 0..10 {
             app.on_key(KeyCode::Down, KeyModifiers::NONE);
         }
-        assert_eq!(app.settings.focus_row, NUM_ROWS - 1);
+        // The last focusable row is the "Create New Client" button at index
+        // `NUM_ROWS` (one past the editable settings rows), so Down clamps
+        // there — not at `NUM_ROWS - 1`.
+        assert_eq!(app.settings.focus_row, NUM_ROWS);
     }
 
     #[test]

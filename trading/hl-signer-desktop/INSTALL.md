@@ -1,8 +1,66 @@
 # Install `hl-signer-desktop`
 
-The DegenBox Hyperliquid local desktop signer. Holds your encrypted
-HL API agent key locally and signs queued instructions from the
-DegenBox server.
+The DegenBox unified local desktop signer:
+
+- **Hyperliquid** — holds your encrypted HL API agent key locally and
+  signs queued instructions from the DegenBox server (`setup` /
+  `register` / `daemon` / the interactive TUI).
+- **Solana** — holds your encrypted Solana hot wallet, executes TP/SL
+  sell triggers + copy-trade commands, and serves the local
+  `127.0.0.1:5829` bridge so the DegenBox web app can use this signer
+  (`sol init` / `sol import` / `sol daemon` / the TUI's Solana tab).
+
+Both keystores live under `~/.config/degenbox/` and are shared with
+the DegenBox Signer desktop app — you can flip between the CLI and the
+app without re-importing. The standalone Solana `signer-cli` is
+deprecated in favour of this binary.
+
+## Multi-wallet vault (shared with the desktop app)
+
+N Solana + N Hyperliquid wallets under ONE master password, stored in
+`~/.config/degenbox/vault/` — the exact directory and format the
+desktop app uses, so wallets added in either place appear in both.
+Legacy single keystores are adopted into the vault automatically on
+first use (originals kept as `.bak`).
+
+```sh
+hl-signer-desktop clients add  --chain sol --label "main"   # generate (creates the vault)
+hl-signer-desktop clients import --chain hl --label "agent" # paste an HL API agent key
+hl-signer-desktop clients list [--json]                     # vault + server registry merged
+hl-signer-desktop clients pause <id|label|address>          # per-client kill-switch
+hl-signer-desktop clients resume <…>
+hl-signer-desktop clients set-primary <…>                   # which wallet executes
+hl-signer-desktop clients label <…> "new name"
+hl-signer-desktop clients remove <…>                        # keystore kept as .removed.bak
+```
+
+Run the whole fleet headless (the equivalent of the unlocked desktop
+app — HL primary executes, other HL wallets keep a standby heartbeat,
+the Solana primary runs TP/SL + copy streams and the `:5829` bridge):
+
+```sh
+hl-signer-desktop run [--password-stdin]   # or $DEGENBOX_MASTER_PASSWORD
+```
+
+The interactive TUI gets the same fleet on its **Clients** tab (tab 4):
+add / import / pause / set-primary / label / remove.
+
+## Discord login (headless)
+
+```sh
+hl-signer-desktop login     # prints a URL — open it in ANY browser (your laptop is fine)
+```
+
+After authorizing, the browser is redirected to a
+`degenbox://auth/callback?code=…` link. Without the desktop app
+installed that link opens nothing — copy the URL (or just the `code=`
+value) from the address bar and paste it back into the terminal.
+Firefox shows the `degenbox://` URL in the address bar; Chrome may only
+show an "open app?" dialog, so use Firefox if you can't see the code.
+The minted token is stored in `~/.config/degenbox/desktop-auth.json`
+(shared with the desktop app) and feeds the Solana runtime + `clients`
+commands automatically. `hl-signer-desktop account` shows the link,
+`logout` removes it.
 
 ## Verify the source
 
@@ -53,7 +111,17 @@ shipped publicly — only `hl-signer-desktop` is installed today.)
 Then:
 
 ```sh
-hl-signer-desktop setup
+hl-signer-desktop setup        # Hyperliquid agent key
+hl-signer-desktop sol init     # Solana hot wallet (optional)
+```
+
+Solana quick reference:
+
+```sh
+hl-signer-desktop sol import --file ~/.degenbox/keystore.json   # adopt a signer-cli keystore
+hl-signer-desktop sol import --extension-json export.json      # adopt a Chrome-extension export
+hl-signer-desktop sol budget --session-sol 0.5                 # REQUIRED before copy buys fire
+hl-signer-desktop sol daemon                                   # headless executor + :5829 bridge
 ```
 
 ## Manual install

@@ -33,6 +33,12 @@ pub const BRAND_CANVAS: Color = Color::Rgb(22, 23, 27);
 /// Accent ink — matches `--accent-ink` (very dark, used as fg on the
 /// filled accent tab pill).
 pub const BRAND_ACCENT_INK: Color = Color::Rgb(11, 12, 14);
+/// Paused — a calm slate-blue, deliberately DISTINCT from the amber
+/// "connecting" warn so a paused client can't be mistaken for one
+/// that's mid-handshake. (Web app has no var; chosen to read on canvas.)
+pub const BRAND_PAUSED: Color = Color::Rgb(125, 168, 232);
+/// Strong emphasis ink for headline values (account value, big labels).
+pub const BRAND_EMPHASIS: Color = Color::Rgb(247, 248, 250);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
@@ -124,6 +130,53 @@ impl Theme {
             Style::default().bg(BRAND_CANVAS)
         } else {
             Style::default()
+        }
+    }
+
+    /// Paused state — slate-blue, distinct from connecting-amber so the
+    /// two read differently at a glance.
+    pub fn paused(self) -> Style {
+        if self.colored {
+            Style::default().fg(BRAND_PAUSED)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        }
+    }
+
+    /// Headline emphasis (account value, big numbers).
+    pub fn emphasis(self) -> Style {
+        if self.colored {
+            Style::default()
+                .fg(BRAND_EMPHASIS)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        }
+    }
+
+    /// A solid status pill: dark ink on a colored background, used for
+    /// the connection state so it reads as a badge, not just text.
+    pub fn pill(self, color: Color) -> Style {
+        if self.colored {
+            Style::default()
+                .fg(BRAND_ACCENT_INK)
+                .bg(color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        }
+    }
+
+    /// Resolve the brand color for a connection-state pill background.
+    pub fn conn_color(self, ready: bool, paused: bool, error: bool) -> Color {
+        if error {
+            BRAND_DOWN
+        } else if paused {
+            BRAND_PAUSED
+        } else if ready {
+            BRAND_ACCENT
+        } else {
+            BRAND_WARN
         }
     }
 }

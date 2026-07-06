@@ -76,7 +76,7 @@ struct MessageVisitor {
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.out = format!("{:?}", value);
+            self.out = format!("{value:?}");
             // strip the surrounding quotes Debug adds for `&str`.
             if self.out.starts_with('"') && self.out.ends_with('"') && self.out.len() >= 2 {
                 self.out = self.out[1..self.out.len() - 1].to_string();

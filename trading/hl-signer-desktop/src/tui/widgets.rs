@@ -24,24 +24,29 @@ pub struct HeaderProps {
 }
 
 pub fn header(frame: &mut Frame<'_>, area: Rect, props: HeaderProps, theme: Theme) {
-    let pill_style = match props.conn {
-        ConnState::Ready => theme.ok().add_modifier(Modifier::BOLD),
-        ConnState::Connecting => theme.warn().add_modifier(Modifier::BOLD),
-        ConnState::Offline => theme.muted().add_modifier(Modifier::BOLD),
-        ConnState::Paused => theme.warn().add_modifier(Modifier::BOLD),
-        ConnState::Error => theme.err().add_modifier(Modifier::BOLD),
+    // Render the connection state as a solid badge so it reads as status
+    // at a glance, with PAUSED in its own slate-blue (not amber) so it's
+    // never confused with CONNECTING.
+    let pill_color = match props.conn {
+        ConnState::Offline => super::theme::BRAND_INK_3,
+        _ => theme.conn_color(
+            matches!(props.conn, ConnState::Ready),
+            matches!(props.conn, ConnState::Paused),
+            matches!(props.conn, ConnState::Error),
+        ),
     };
+    let pill_style = theme.pill(pill_color);
     let dot_style = match props.conn {
         ConnState::Ready => theme.ok(),
         ConnState::Connecting => theme.warn(),
         ConnState::Offline => theme.muted(),
-        ConnState::Paused => theme.warn(),
+        ConnState::Paused => theme.paused(),
         ConnState::Error => theme.err(),
     };
     let mut spans = vec![
         Span::raw("  "),
         Span::styled("\u{25CF} ", dot_style),
-        Span::styled(props.conn.label(), pill_style),
+        Span::styled(format!(" {} ", props.conn.label()), pill_style),
         Span::raw("   "),
         Span::styled("uptime ", theme.muted()),
         Span::styled(format_uptime(props.uptime), theme.neutral()),
@@ -64,7 +69,7 @@ pub fn header(frame: &mut Frame<'_>, area: Rect, props: HeaderProps, theme: Them
             theme.accent().add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
-        Span::styled("keys stay local · self-custody", theme.muted()),
+        Span::styled("", theme.muted()),
     ]);
     let body = Line::from(spans);
     let lines = vec![title, body];
@@ -122,7 +127,7 @@ pub fn kv_lines<'a>(rows: &'a [(&'a str, String)], theme: Theme) -> Vec<Line<'a>
         .map(|(k, v)| {
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{:width$}", k, width = max_key), theme.muted()),
+                Span::styled(format!("{k:max_key$}"), theme.muted()),
                 Span::raw("  "),
                 Span::styled(v.clone(), theme.neutral()),
             ])
@@ -137,7 +142,7 @@ pub fn panel<'a>(title: &'a str, theme: Theme) -> Block<'a> {
         .border_set(border::ROUNDED)
         .border_style(theme.muted())
         .title(Span::styled(
-            format!(" {} ", title),
+            format!(" {title} "),
             theme.accent().add_modifier(Modifier::BOLD),
         ))
         .title_alignment(Alignment::Left)
@@ -219,6 +224,227 @@ pub fn modal(frame: &mut Frame<'_>, modal: &Modal, theme: Theme) {
                 Line::from(Span::styled(body.clone(), theme.neutral())),
                 Line::from(""),
                 Line::from(Span::styled("[Enter] dismiss", theme.muted())),
+            ],
+        ),
+        Modal::SolUnlock { input, error } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Enter the Solana keystore password to start signing.",
+                    theme.neutral(),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("> ", theme.accent()),
+                    Span::styled(
+                        "*".repeat(input.chars().count()),
+                        theme.neutral().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ];
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(err.clone(), theme.err())));
+            }
+            ("Unlock Solana wallet", lines)
+        }
+        Modal::SolBudget { input, error } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Hard SOL spend cap for unattended copy BUYS this session.",
+                    theme.neutral(),
+                )),
+                Line::from(Span::styled(
+                    "Empty = disarm copy buys (sells unaffected).",
+                    theme.muted(),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("> ", theme.accent()),
+                    Span::styled(input.clone(), theme.neutral().add_modifier(Modifier::BOLD)),
+                    Span::styled(" SOL", theme.muted()),
+                ]),
+            ];
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(err.clone(), theme.err())));
+            }
+            ("Copy-session budget", lines)
+        }
+        Modal::ClientLabel { input, error, .. } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "New label for this client (empty clears it).",
+                    theme.neutral(),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("> ", theme.accent()),
+                    Span::styled(input.clone(), theme.neutral().add_modifier(Modifier::BOLD)),
+                ]),
+            ];
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(err.clone(), theme.err())));
+            }
+            ("Edit client label", lines)
+        }
+        Modal::ClientAdd {
+            step,
+            label,
+            input,
+            error,
+        } => {
+            let mut lines = match step {
+                0 => vec![
+                    Line::from(Span::styled(
+                        "Generate a fresh Solana wallet into the shared vault.",
+                        theme.neutral(),
+                    )),
+                    Line::from(Span::styled(
+                        "Label (optional, Enter to continue):",
+                        theme.muted(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("> ", theme.accent()),
+                        Span::styled(input.clone(), theme.neutral().add_modifier(Modifier::BOLD)),
+                    ]),
+                ],
+                _ => vec![
+                    Line::from(Span::styled(
+                        format!(
+                            "Master password{} — one password unlocks every vault wallet.",
+                            if label.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" for \"{label}\"")
+                            }
+                        ),
+                        theme.neutral(),
+                    )),
+                    Line::from(Span::styled(
+                        "Creates the vault on first use (app + CLI share it).",
+                        theme.muted(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("> ", theme.accent()),
+                        Span::styled(
+                            "*".repeat(input.chars().count()),
+                            theme.neutral().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                ],
+            };
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(err.clone(), theme.err())));
+            }
+            ("Add Solana wallet", lines)
+        }
+        Modal::ClientImport {
+            step,
+            chain,
+            input,
+            error,
+            ..
+        } => {
+            let mut lines = match step {
+                0 => vec![
+                    Line::from(Span::styled(
+                        "Import an existing private key into the vault.",
+                        theme.neutral(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("[s] ", theme.accent().add_modifier(Modifier::BOLD)),
+                        Span::styled("Solana (base58 / hex seed or 64-byte key)", theme.neutral()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("[h] ", theme.accent().add_modifier(Modifier::BOLD)),
+                        Span::styled("Hyperliquid API agent (32-byte hex)", theme.neutral()),
+                    ]),
+                ],
+                1 => vec![
+                    Line::from(Span::styled(
+                        format!(
+                            "Paste the {} private key (input hidden).",
+                            chain.as_str().to_uppercase()
+                        ),
+                        theme.neutral(),
+                    )),
+                    Line::from(Span::styled(
+                        if *chain == degenbox_signer_core::WalletChain::Hl {
+                            "⚠ NEVER your main-wallet key — only the sandboxed API agent key."
+                        } else {
+                            "Tip: a 64-byte export works too — the seed is the first half."
+                        },
+                        theme.warn(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("> ", theme.accent()),
+                        Span::styled(
+                            "*".repeat(input.chars().count()),
+                            theme.neutral().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                ],
+                2 => vec![
+                    Line::from(Span::styled(
+                        "Label (optional, Enter to continue):",
+                        theme.neutral(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("> ", theme.accent()),
+                        Span::styled(input.clone(), theme.neutral().add_modifier(Modifier::BOLD)),
+                    ]),
+                ],
+                _ => vec![
+                    Line::from(Span::styled(
+                        "Master password — one password unlocks every vault wallet.",
+                        theme.neutral(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("> ", theme.accent()),
+                        Span::styled(
+                            "*".repeat(input.chars().count()),
+                            theme.neutral().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                ],
+            };
+            if let Some(err) = error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(err.clone(), theme.err())));
+            }
+            ("Import wallet", lines)
+        }
+        Modal::Totp {
+            expires_at, input, ..
+        } => (
+            "2FA required",
+            vec![
+                Line::from(Span::styled(
+                    "The gateway requires your 6-digit authenticator code for this trade.",
+                    theme.neutral(),
+                )),
+                Line::from(Span::styled(
+                    format!("Challenge expires: {expires_at}"),
+                    theme.muted(),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("> ", theme.accent()),
+                    Span::styled(input.clone(), theme.neutral().add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "[Enter] submit   [Esc] decline (the trade report is failed)",
+                    theme.muted(),
+                )),
             ],
         ),
     };

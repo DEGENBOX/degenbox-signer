@@ -8,7 +8,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use ratatui::Frame;
@@ -25,56 +25,162 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Constraint::Length(5),
         ])
         .split(area);
-    render_identity(app, frame, chunks[0]);
+    render_bot_list(app, frame, chunks[0]);
     render_orders(app, frame, chunks[1]);
     render_queue(app, frame, chunks[2]);
 }
 
-fn render_identity(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    let conn = app
-        .runtime
-        .lock()
-        .ok()
-        .and_then(|r| r.conn)
-        .unwrap_or(ConnState::Offline);
-    let user_id = app
-        .runtime
-        .lock()
-        .ok()
-        .and_then(|r| r.user_id.clone())
-        .unwrap_or_else(|| "(not registered)".to_string());
-    let agent = app
-        .agent_address
-        .clone()
-        .unwrap_or_else(|| "(no keystore)".to_string());
-    let fp = fingerprint(&agent);
-    let rows = vec![
-        ("Signer key", fp),
-        ("Agent address", agent),
-        ("DegenBox user", user_id),
-        ("Server", app.cfg.server_url.clone()),
-        ("Connection", conn.label().to_string()),
-    ];
-    let lines = widgets::kv_lines(&rows, app.theme);
-    let p = Paragraph::new(lines).block(widgets::panel("Identity", app.theme));
-    frame.render_widget(p, area);
+fn render_bot_list(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let header = Row::new(vec![
+        Cell::from(Span::styled("Client", app.theme.muted())),
+        Cell::from(Span::styled("Status", app.theme.muted())),
+        Cell::from(Span::styled("Account $", app.theme.muted())),
+        Cell::from(Span::styled("Poll", app.theme.muted())),
+        Cell::from(Span::styled("Net", app.theme.muted())),
+        Cell::from(Span::styled("Agent", app.theme.muted())),
+    ]);
+
+    let mut rows = Vec::new();
+    let tick = (app.uptime().as_millis() / 120) as u64;
+
+    for (i, bot) in app.bots.iter().enumerate() {
+        let is_selected = i == app.active_bot_idx;
+        let rt = bot.runtime.lock().ok();
+        let conn = rt
+            .as_ref()
+            .and_then(|r| r.conn)
+            .unwrap_or(ConnState::Offline);
+        let paper = rt.as_ref().map(|r| r.paper_mode).unwrap_or(false);
+        let acct_value = rt
+            .as_ref()
+            .and_then(|r| r.balance.account_value_usd.clone());
+        let last_poll = rt.as_ref().and_then(|r| r.last_poll_at);
+
+        let (glyph, status_style, label) = match conn {
+            ConnState::Connecting => (
+                crate::tui::logo::spinner(tick),
+                app.theme.warn().add_modifier(Modifier::BOLD),
+                "CONNECTING",
+            ),
+            ConnState::Ready => (
+                crate::tui::logo::pulse(tick),
+                app.theme.ok().add_modifier(Modifier::BOLD),
+                "ONLINE",
+            ),
+            ConnState::Error => (
+                "\u{2717}",
+                app.theme.err().add_modifier(Modifier::BOLD),
+                "ERROR",
+            ),
+            ConnState::Paused => (
+                "\u{23F8}",
+                app.theme.paused().add_modifier(Modifier::BOLD),
+                "PAUSED",
+            ),
+            ConnState::Offline => ("\u{25CB}", app.theme.muted(), "OFFLINE"),
+        };
+
+        let addr = bot.agent_address.clone().unwrap_or_else(|| "-".into());
+        let addr_short = fingerprint(&addr);
+
+        let style = if is_selected {
+            app.theme
+                .neutral()
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            app.theme.neutral()
+        };
+
+        // Name cell carries a PAPER badge so a dry-run client is never
+        // mistaken for live.
+        let name_label = if paper {
+            format!(
+                "{} {} [PAPER]",
+                if is_selected { ">" } else { " " },
+                bot.name
+            )
+        } else {
+            format!("{} {}", if is_selected { ">" } else { " " }, bot.name)
+        };
+
+        let acct_cell = acct_value
+            .map(|v| format!("${v}"))
+            .unwrap_or_else(|| "-".into());
+        let poll_cell = match last_poll {
+            Some(t) => format!("{}s", (chrono::Utc::now() - t).num_seconds().max(0)),
+            None => "-".into(),
+        };
+
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(name_label, style)),
+            Cell::from(Span::styled(format!("{glyph} {label}"), status_style)),
+            Cell::from(Span::styled(acct_cell, app.theme.neutral())),
+            Cell::from(Span::styled(poll_cell, app.theme.muted())),
+            Cell::from(Span::styled(
+                format!("{:?}", bot.cfg.network).to_lowercase(),
+                app.theme.muted(),
+            )),
+            Cell::from(Span::styled(addr_short, app.theme.muted())),
+        ]));
+    }
+
+    if rows.is_empty() {
+        rows.push(Row::new(vec![Cell::from(Span::styled(
+            "No clients configured — go to Settings ▸ Create New Client.",
+            app.theme.warn(),
+        ))]));
+    }
+
+    let t = Table::new(
+        rows,
+        [
+            Constraint::Length(22),
+            Constraint::Length(14),
+            Constraint::Length(12),
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Min(14),
+        ],
+    )
+    .header(header)
+    .block(widgets::panel("Clients  (↑/↓ select · p pause)", app.theme));
+
+    frame.render_widget(t, area);
 }
 
 fn render_orders(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    let rt = app.runtime.lock().ok();
+    let rt = app
+        .bots
+        .get(app.active_bot_idx)
+        .and_then(|b| b.runtime.lock().ok());
     let orders: Vec<_> = rt
         .as_ref()
         .map(|r| r.orders.iter().rev().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     if orders.is_empty() {
-        frame.render_widget(
-            widgets::empty_panel(
-                "Recent orders",
-                "No orders yet — waiting for the server to queue one.",
-                app.theme,
-            ),
-            area,
-        );
+        // Branded idle splash — show the DegenBox logo until the first order
+        // flows in, so the dashboard has presence instead of an empty panel.
+        let mut lines = vec![Line::from("")];
+        for l in crate::tui::logo::LOGO {
+            lines.push(Line::from(Span::styled(
+                *l,
+                app.theme.accent().add_modifier(Modifier::BOLD),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            crate::tui::logo::TAGLINE,
+            app.theme.muted(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No orders yet — the bot is watching for signals.",
+            app.theme.muted(),
+        )));
+        let p = Paragraph::new(lines)
+            .block(widgets::panel("Recent orders", app.theme))
+            .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(p, area);
         return;
     }
     let header = Row::new(vec![
@@ -83,7 +189,8 @@ fn render_orders(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Cell::from(Span::styled("side", app.theme.muted())),
         Cell::from(Span::styled("size $", app.theme.muted())),
         Cell::from(Span::styled("status", app.theme.muted())),
-        Cell::from(Span::styled("fill ms", app.theme.muted())),
+        Cell::from(Span::styled("pnl", app.theme.muted())),
+        Cell::from(Span::styled("ms", app.theme.muted())),
     ])
     .height(1);
     let rows: Vec<Row> = orders
@@ -104,12 +211,23 @@ fn render_orders(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 } else {
                     app.theme.neutral()
                 };
+            let pnl_cell = match &o.pnl {
+                Some(p) => {
+                    let neg = p.trim_start().starts_with('-');
+                    Span::styled(
+                        p.clone(),
+                        if neg { app.theme.err() } else { app.theme.ok() },
+                    )
+                }
+                None => Span::styled("-".to_string(), app.theme.muted()),
+            };
             Row::new(vec![
                 Cell::from(o.at.format("%H:%M:%S").to_string()),
                 Cell::from(o.coin.clone()),
                 Cell::from(side_cell(&o.side, app.theme)),
                 Cell::from(o.size_usd.clone()),
                 Cell::from(Span::styled(o.status.clone(), status_style)),
+                Cell::from(pnl_cell),
                 Cell::from(
                     o.fill_ms
                         .map(|ms| format!("{ms}"))
@@ -123,8 +241,9 @@ fn render_orders(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Constraint::Length(8),
         Constraint::Length(5),
         Constraint::Length(10),
+        Constraint::Length(12),
         Constraint::Length(10),
-        Constraint::Length(8),
+        Constraint::Length(6),
     ];
     let table = Table::new(rows, widths)
         .header(header)
@@ -133,20 +252,24 @@ fn render_orders(app: &App, frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn render_queue(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    let rt = app.runtime.lock().ok();
+    let rt = app
+        .bots
+        .get(app.active_bot_idx)
+        .and_then(|b| b.runtime.lock().ok());
     let queue = rt.as_ref().map(|r| r.queue.clone()).unwrap_or_default();
+    let last_error = rt.as_ref().and_then(|r| r.error.clone());
     let drained = queue
         .last_drained_at
         .map(|t| {
             let secs = (chrono::Utc::now() - t).num_seconds().max(0);
-            format!("{}s ago", secs)
+            format!("{secs}s ago")
         })
         .unwrap_or_else(|| "never".to_string());
     let preview = queue
         .next_preview
         .clone()
         .unwrap_or_else(|| "(idle)".to_string());
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::raw("  "),
             Span::styled("pending: ", app.theme.muted()),
@@ -168,6 +291,14 @@ fn render_queue(app: &App, frame: &mut Frame<'_>, area: Rect) {
             Span::styled(preview, app.theme.neutral()),
         ]),
     ];
+    // Surface the most recent client error so failures aren't silent.
+    if let Some(err) = last_error {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{26A0} ", app.theme.err()),
+            Span::styled(err, app.theme.err()),
+        ]));
+    }
     let p = Paragraph::new(lines).block(widgets::panel("Queue", app.theme));
     frame.render_widget(p, area);
 }
@@ -193,9 +324,27 @@ fn fingerprint(addr: &str) -> String {
     format!("0x{head}\u{2026}{tail}")
 }
 
-pub fn handle_key(_app: &mut App, _code: KeyCode, _mods: KeyModifiers) -> AppOutcome {
-    // Status is read-only; the parent handles 'p' (pause) and tab nav.
-    AppOutcome::Continue
+pub fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> AppOutcome {
+    match code {
+        KeyCode::Up => {
+            if app.active_bot_idx > 0 {
+                app.active_bot_idx -= 1;
+            }
+            AppOutcome::Continue
+        }
+        KeyCode::Down => {
+            if app.active_bot_idx + 1 < app.bots.len() {
+                app.active_bot_idx += 1;
+            }
+            AppOutcome::Continue
+        }
+        KeyCode::Char('p') => {
+            // Real pause: flip the shared atomic the daemon reads.
+            app.toggle_pause_active();
+            AppOutcome::Continue
+        }
+        _ => AppOutcome::Continue,
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +366,7 @@ mod tests {
             size_usd: "1200".into(),
             status: "filled".into(),
             fill_ms: Some(143),
+            pnl: None,
         });
         rt.push_order(OrderRow {
             at: chrono::DateTime::from_timestamp(1_700_000_010, 0).unwrap(),
@@ -225,6 +375,7 @@ mod tests {
             size_usd: "800".into(),
             status: "err".into(),
             fill_ms: None,
+            pnl: Some("-12.5".into()),
         });
         rt.queue.pending = 2;
         rt.queue.next_preview = Some("BTC buy 100".into());
@@ -248,9 +399,11 @@ mod tests {
         let app = snapshot_app();
         terminal.draw(|f| render(&app, f, f.area())).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // Sanity: the buffer contains the things we put in it.
+        // Sanity: the buffer contains the things we put in it. The post-hub
+        // renderer surfaces a per-client "Clients" panel (was "Identity"
+        // in the single-runtime build), plus the orders + queue panels.
         let dump = buffer_to_string(&buf);
-        assert!(dump.contains("Identity"));
+        assert!(dump.contains("Clients"), "client list panel present");
         assert!(dump.contains("Recent orders"));
         assert!(dump.contains("Queue"));
         assert!(dump.contains("BTC"));

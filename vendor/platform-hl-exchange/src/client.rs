@@ -148,7 +148,9 @@ impl ExchangeClient {
         action: &OrderAction,
         signer: &AgentSigner,
     ) -> Result<OrderResult, ExchangeError> {
-        let resp = self.post_action(action, signer, None).await?;
+        // Retryable: orders carry a `cloid`, so a retry after a lost
+        // response is deduped by HL rather than double-filled.
+        let resp = self.post_action(action, signer, None, true).await?;
         parse_order_result(&resp)
     }
 
@@ -157,7 +159,9 @@ impl ExchangeClient {
         action: &CancelAction,
         signer: &AgentSigner,
     ) -> Result<CancelResult, ExchangeError> {
-        let resp = self.post_action(action, signer, None).await?;
+        // Retryable: cancelling an already-cancelled order is a harmless
+        // no-op.
+        let resp = self.post_action(action, signer, None, true).await?;
         parse_cancel_result(&resp)
     }
 
@@ -166,7 +170,7 @@ impl ExchangeClient {
         action: &CancelByCloidAction,
         signer: &AgentSigner,
     ) -> Result<CancelResult, ExchangeError> {
-        let resp = self.post_action(action, signer, None).await?;
+        let resp = self.post_action(action, signer, None, true).await?;
         parse_cancel_result(&resp)
     }
 
@@ -175,7 +179,9 @@ impl ExchangeClient {
         action: &UpdateLeverageAction,
         signer: &AgentSigner,
     ) -> Result<(), ExchangeError> {
-        let _ = self.post_action(action, signer, None).await?;
+        // Retryable: idempotent — setting the same leverage twice is a
+        // no-op.
+        let _ = self.post_action(action, signer, None, true).await?;
         Ok(())
     }
 
@@ -187,7 +193,9 @@ impl ExchangeClient {
         action: &VaultTransferAction,
         signer: &AgentSigner,
     ) -> Result<(), ExchangeError> {
-        let _ = self.post_action(action, signer, None).await?;
+        // NOT retryable: a vault transfer has no dedup key, so re-POSTing
+        // after a lost response could move funds twice.
+        let _ = self.post_action(action, signer, None, false).await?;
         Ok(())
     }
 
@@ -214,21 +222,56 @@ impl ExchangeClient {
         })
     }
 
+    /// Sign + POST an action to `/exchange`, with bounded retry/backoff on
+    /// **transient** transport failures (network error, HTTP 429, HTTP
+    /// 5xx). Each attempt re-signs with a FRESH nonce — HL rejects reused
+    /// nonces — while the action (and its `cloid`, for order actions) stays
+    /// identical, so a retry after a lost response is deduplicated by HL on
+    /// the cloid instead of double-submitting.
+    ///
+    /// `retryable` MUST be `false` for non-idempotent actions with no
+    /// dedup key (vault transfers): a retry after a request that actually
+    /// landed but whose response was lost would move funds twice. Order /
+    /// cancel / leverage actions are safe (cloid dedup or idempotent).
+    /// Business-level rejects (HL `status != "ok"`, per-order errors) are
+    /// returned immediately — they are never transient.
     async fn post_action<A: serde::Serialize>(
         &self,
         action: &A,
         signer: &AgentSigner,
         vault_address: Option<&str>,
+        retryable: bool,
     ) -> Result<ExchangeResponse, ExchangeError> {
-        let nonce = self.next_nonce();
-        let sig = signer.sign_l1_action(action, nonce, vault_address.unwrap_or(""))?;
-        let req = ExchangeRequest {
-            action,
-            nonce,
-            signature: &sig,
-            vault_address,
-        };
-        self.post_raw(&req).await
+        // Attempts 2 and 3 wait 250ms then 750ms — a ~1s worst-case budget
+        // that rides out a transient blip without stalling the signer loop.
+        const BACKOFF_MS: [u64; 2] = [250, 750];
+        let max_attempts = if retryable { BACKOFF_MS.len() + 1 } else { 1 };
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let nonce = self.next_nonce();
+            let sig = signer.sign_l1_action(action, nonce, vault_address.unwrap_or(""))?;
+            let req = ExchangeRequest {
+                action,
+                nonce,
+                signature: &sig,
+                vault_address,
+            };
+            match self.post_raw(&req).await {
+                Ok(env) => return Ok(env),
+                Err(e) if attempt < max_attempts && is_transient(&e) => {
+                    let wait = BACKOFF_MS[attempt - 1];
+                    tracing::warn!(
+                        attempt,
+                        wait_ms = wait,
+                        error = %e,
+                        "hl /exchange transient error — retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     async fn post_raw<T: serde::Serialize>(
@@ -263,6 +306,19 @@ impl ExchangeClient {
             return Err(ExchangeError::Api(msg));
         }
         Ok(env)
+    }
+}
+
+/// Whether an `/exchange` error is worth retrying. Network/transport
+/// failures and HL's rate-limit (429) / server-error (5xx) responses are
+/// transient. A 4xx (other than 429), a decode failure, a signing error,
+/// or an HL business reject (`Api`) is permanent — retrying only wastes
+/// the budget and, for rejects, would re-submit a doomed action.
+fn is_transient(e: &ExchangeError) -> bool {
+    match e {
+        ExchangeError::Http(_) => true,
+        ExchangeError::Status(code, _) => *code == 429 || (500..=599).contains(code),
+        ExchangeError::Decode(_) | ExchangeError::Sign(_) | ExchangeError::Api(_) => false,
     }
 }
 
@@ -373,6 +429,21 @@ mod tests {
         let n3 = c.next_nonce();
         assert!(n2 > n1);
         assert!(n3 > n2);
+    }
+
+    #[test]
+    fn is_transient_only_retries_network_429_and_5xx() {
+        // Retryable.
+        assert!(is_transient(&ExchangeError::Status(429, "rate".into())));
+        assert!(is_transient(&ExchangeError::Status(500, "boom".into())));
+        assert!(is_transient(&ExchangeError::Status(503, "down".into())));
+        // Permanent — never retry a business reject or a 4xx.
+        assert!(!is_transient(&ExchangeError::Status(400, "bad".into())));
+        assert!(!is_transient(&ExchangeError::Status(422, "reject".into())));
+        assert!(!is_transient(&ExchangeError::Api(
+            "insufficient margin".into()
+        )));
+        assert!(!is_transient(&ExchangeError::Decode("garbage".into())));
     }
 
     #[test]

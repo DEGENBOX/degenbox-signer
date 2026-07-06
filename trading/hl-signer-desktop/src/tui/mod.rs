@@ -29,6 +29,7 @@
 pub mod app;
 pub mod events;
 pub mod log_capture;
+pub mod logo;
 pub mod screens;
 pub mod setup_wizard;
 pub mod theme;
@@ -62,7 +63,13 @@ pub async fn run() -> Result<()> {
     // not we land in the first-run wizard; otherwise the main screen.
     let ks_path = config::default_keystore_path().context("default keystore path")?;
     let cfg_path = config::default_config_path().context("default config path")?;
-    let has_keystore = ks_path.exists();
+    // Anything signable counts: the legacy global keystore, a `bots/`
+    // hub client, or the shared multi-wallet vault (the legacy file is
+    // renamed `.bak` once migrated into the vault — without this check
+    // a migrated install would wrongly land in the first-run wizard).
+    let has_keystore = ks_path.exists()
+        || !config::discover_bots().unwrap_or_default().is_empty()
+        || crate::clients::vault_exists();
 
     let mut terminal = setup_terminal().context("init terminal")?;
     let log_buf = log_capture::install();
@@ -88,11 +95,11 @@ pub async fn run() -> Result<()> {
 
 async fn run_main(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ks_path: std::path::PathBuf,
-    cfg_path: std::path::PathBuf,
+    _ks_path: std::path::PathBuf,
+    _cfg_path: std::path::PathBuf,
     log_buf: log_capture::LogBuffer,
 ) -> Result<()> {
-    let mut app = App::bootstrap(ks_path, cfg_path, log_buf)?;
+    let mut app = App::bootstrap(log_buf)?;
     let mut events = events::EventStream::new(Duration::from_millis(250));
 
     loop {
@@ -107,6 +114,24 @@ async fn run_main(
                     };
                     if matches!(outcome, AppOutcome::Quit) {
                         return Ok(());
+                    } else if matches!(outcome, AppOutcome::RunWizard) {
+                        // Suspend TUI and launch wizard
+                        restore_terminal(terminal)?;
+                        let n = app.bots.len() + 1;
+                        let clients_dir = crate::config::bots_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from(".degenbox/clients"));
+                        let new_dir = clients_dir.join(format!("client_{n}"));
+                        std::fs::create_dir_all(&new_dir)?;
+
+                        let ks_path = new_dir.join("hl-keystore.json");
+                        let cfg_path = new_dir.join("hl-config.json");
+
+                        crate::tui::setup_wizard::run(terminal, ks_path, cfg_path).await?;
+
+                        // Restore TUI and reload app
+                        *terminal = setup_terminal()?;
+                        app = App::bootstrap(app.log_buf.clone())?;
+                        terminal.clear()?;
                     }
                 }
                 events::TuiEvent::Term(Event::Mouse(m))
@@ -143,9 +168,18 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 }
 
 /// Convenience re-exports for binaries that wire the TUI in directly.
+#[allow(unused_imports)] // public convenience surface; not consumed within this bin crate
 pub use app::App as TuiApp;
+#[allow(unused_imports)] // public convenience surface; not consumed within this bin crate
 pub use setup_wizard::WizardOutcome;
 
 /// Order in which tabs appear in the header. Kept here so the click
 /// handler and the renderer agree on indexing.
-pub const TAB_ORDER: &[Tab] = &[Tab::Status, Tab::Wallet, Tab::Settings, Tab::Logs];
+pub const TAB_ORDER: &[Tab] = &[
+    Tab::Status,
+    Tab::Wallet,
+    Tab::Solana,
+    Tab::Clients,
+    Tab::Settings,
+    Tab::Logs,
+];

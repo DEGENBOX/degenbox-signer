@@ -24,7 +24,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
         vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  (no log lines yet — start the daemon to see traffic here)",
+                "  (no log lines yet — start the bot to see traffic here)",
                 app.theme.muted(),
             )),
         ]
