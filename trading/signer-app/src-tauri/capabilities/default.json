@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main signer window. Locked-down on purpose: the frontend can talk only to our own backend commands + the standard plugin surface. No fs / process / shell exec.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "dialog:default",
+    "notification:default",
+    "opener:default",
+    "updater:default",
+    "deep-link:default",
+    "process:default"
+  ]
+}

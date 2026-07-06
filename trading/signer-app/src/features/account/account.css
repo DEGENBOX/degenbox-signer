@@ -1,0 +1,197 @@
+/* W3.4 — Account tab feature styles. app.css is append-frozen (W1
+ * shell), so everything Account-specific lives here. Imported once by
+ * pages/AccountTab.tsx.
+ *
+ * Glow budget: the ONE glow focus on this screen is the 04/ACTIVITY
+ * terminal (its phosphor bloom + faint outer glow). Everything else is
+ * hairlines + mono microcopy. */
+
+/* ───────────────────── shared bits ───────────────────── */
+
+/* Identity header inside the 01/ACCOUNT card. */
+.acct-id {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.acct-id .who {
+  min-width: 0;
+}
+
+.acct-id .who .name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.acct-id .who .sub {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+/* Inline 2FA challenge entry (Security card). */
+.acct-totp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.acct-totp-row .input {
+  width: 104px;
+}
+
+/* Passphrase-cache picker — two hairline segments. */
+.acct-backend {
+  display: inline-flex;
+  border: 1px solid var(--border);
+}
+
+.acct-backend button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 5px 12px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+
+.acct-backend button + button {
+  border-left: 1px solid var(--border);
+}
+
+.acct-backend button.active {
+  color: var(--accent);
+  background: rgb(var(--accent-rgb) / 0.08);
+}
+
+/* ───────────────── 04 / ACTIVITY — signer journal ─────────────────
+ * Terminal-look log feed: dark inset pit, phosphor text tinted by the
+ * mode accent (--led), CSS-only scanlines, newest line at the bottom.
+ * "Logs wie der Bot sie machen würde." */
+
+.terminal {
+  /* Phosphor follows the mode accent (mint in .mode-sol, indigo in
+   * .mode-perps) — same trick as --glow-rgb in the theme. */
+  --led: var(--accent-rgb);
+  position: relative;
+  border: 1px solid rgb(var(--line) / 0.16);
+  background-color: rgb(3 4 8 / 0.94);
+  box-shadow:
+    inset 0 0 36px rgb(0 0 0 / 0.55),
+    0 0 24px rgb(var(--led) / 0.07);
+  overflow: hidden;
+}
+
+/* Scanlines + corner vignette — one pointer-transparent overlay,
+ * no canvas, no animation (CRT restraint). */
+.terminal::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgb(0 0 0 / 0.15) 0px,
+      rgb(0 0 0 / 0.15) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(ellipse at center, transparent 62%, rgb(0 0 0 / 0.32) 100%);
+}
+
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgb(var(--line) / 0.1);
+  background: rgb(var(--card) / 0.55);
+}
+
+.terminal-head .spacer {
+  flex: 1;
+}
+
+.terminal-body {
+  height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 14px 8px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: rgb(var(--led) / 0.8);
+  text-shadow: 0 0 7px rgb(var(--led) / 0.22);
+}
+
+.terminal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-body::-webkit-scrollbar-thumb {
+  background: rgb(var(--led) / 0.18);
+}
+
+.tl-line {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Dim spans drop the bloom so the hot parts read hotter. */
+.tl-time,
+.tl-dim {
+  color: var(--fg-faint);
+  text-shadow: none;
+}
+
+.tl-id {
+  color: var(--fg-dim);
+  text-shadow: none;
+}
+
+.tl-tag {
+  color: rgb(var(--led) / 0.95);
+}
+
+.tl-ok {
+  color: rgb(var(--up) / 0.92);
+  text-shadow: 0 0 7px rgb(var(--up) / 0.3);
+}
+
+.tl-fail {
+  color: rgb(var(--down) / 0.95);
+  text-shadow: 0 0 7px rgb(var(--down) / 0.3);
+}
+
+.tl-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: rgb(var(--led) / 0.85);
+  box-shadow: 0 0 8px rgb(var(--led) / 0.5);
+  animation: tl-blink 1.1s steps(1) infinite;
+}
+
+@keyframes tl-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-cursor {
+    animation: none;
+  }
+}

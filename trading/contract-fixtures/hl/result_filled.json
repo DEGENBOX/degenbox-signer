@@ -1,0 +1,10 @@
+{
+  "cloid": "close:0:50:exec-7",
+  "oid": 987654322,
+  "status": "filled",
+  "filled_size_usd": "500.25",
+  "closed_pnl": "-42.5",
+  "err_msg": null,
+  "signed_at": "2026-06-11T12:00:00Z",
+  "posted_to_hl_at": "2026-06-11T12:00:01Z"
+}

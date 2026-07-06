@@ -1,0 +1,362 @@
+/* Live Bot-activity feed — the instruction-lifecycle table that mirrors
+ * the web Bot tabs. Hairlines + mono microcopy, no filled cards; tone
+ * chips reuse the theme's --up/--down/--amber and the mode accent so the
+ * feed re-tints with .mode-sol / .mode-perps like the rest of the app.
+ * Imported once by ActivityFeed.tsx. */
+
+.act-feed {
+  border: 1px solid rgb(var(--line) / 0.12);
+  background: rgb(var(--card) / 0.4);
+}
+
+/* ── filter strip ───────────────────────────────────────────────── */
+.act-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgb(var(--line) / 0.1);
+}
+
+.act-filters .act-lead {
+  color: var(--fg-faint);
+  display: inline-flex;
+  margin-right: 2px;
+}
+
+.act-pill {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition:
+    background 0.14s ease,
+    color 0.14s ease;
+}
+
+.act-pill:hover {
+  color: var(--fg);
+  background: rgb(var(--card-hover) / 0.6);
+}
+
+.act-pill.active {
+  color: var(--accent);
+  background: rgb(var(--accent-rgb) / 0.14);
+}
+
+.act-count {
+  margin-left: auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+/* ── table ──────────────────────────────────────────────────────── */
+.act-scroll {
+  max-height: 360px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.act-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.act-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgb(var(--canvas) / 0.96);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid rgb(var(--line) / 0.14);
+  padding: 7px 12px;
+  font-weight: 400;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  text-align: left;
+}
+
+.act-table th.r,
+.act-table td.r {
+  text-align: right;
+}
+
+.act-table tbody td {
+  padding: 7px 12px;
+  border-bottom: 1px solid rgb(var(--line) / 0.06);
+  vertical-align: middle;
+}
+
+.act-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.act-table tbody tr:hover td {
+  background: rgb(var(--card-hover) / 0.5);
+}
+
+.act-time,
+.act-mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.act-time {
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.act-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.act-action.buy {
+  color: rgb(var(--up));
+}
+.act-action.sell {
+  color: rgb(var(--down));
+}
+.act-action.neutral {
+  color: var(--fg-dim);
+}
+
+.act-asset {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.act-dex {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgb(var(--canvas) / 0.6);
+  border: 1px solid rgb(var(--line) / 0.16);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.act-size {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.act-lev {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.act-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
+
+.act-source.manual {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.act-detail {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.act-detail a {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.act-detail a:hover {
+  text-decoration: underline;
+}
+
+.act-fail {
+  color: rgb(var(--down) / 0.9);
+}
+.act-gain {
+  color: rgb(var(--up));
+}
+.act-loss {
+  color: rgb(var(--down));
+}
+.act-warn {
+  color: var(--amber);
+}
+.act-dim {
+  color: var(--fg-faint);
+}
+
+/* ── lifecycle cell: stage bar + tone chip ──────────────────────── */
+.act-life {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.act-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.act-bar .seg {
+  height: 4px;
+  width: 12px;
+  border-radius: 999px;
+  background: rgb(var(--line) / 0.22);
+  transition: background 0.2s ease;
+}
+
+.act-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* tone → chip + lit-segment colour. --tc is the tone rgb triple. */
+.tone-good {
+  --tc: var(--up);
+}
+.tone-bad {
+  --tc: var(--down);
+}
+.tone-warn {
+  --tc: 234 179 8;
+}
+.tone-info {
+  --tc: 56 189 248;
+}
+.tone-muted {
+  --tc: var(--line);
+}
+
+.act-chip {
+  color: rgb(var(--tc));
+  background: rgb(var(--tc) / 0.12);
+}
+.tone-muted.act-chip {
+  color: var(--fg-faint);
+  background: rgb(var(--line) / 0.1);
+}
+
+.act-bar .seg.on {
+  background: rgb(var(--tc));
+}
+.tone-muted .act-bar .seg.on,
+.act-bar.tone-muted .seg.on {
+  background: rgb(var(--line) / 0.5);
+}
+
+/* live pulse dot inside a non-terminal chip */
+.act-live {
+  position: relative;
+  display: inline-flex;
+  height: 6px;
+  width: 6px;
+}
+.act-live span {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: currentColor;
+}
+.act-live span.ping {
+  opacity: 0.6;
+  animation: act-ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes act-ping {
+  75%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .act-live span.ping {
+    animation: none;
+  }
+}
+
+/* ── states ─────────────────────────────────────────────────────── */
+.act-state {
+  padding: 34px 16px;
+  text-align: center;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+.act-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 40px 16px;
+  text-align: center;
+}
+.act-empty .act-empty-icon {
+  color: var(--fg-faint);
+}
+.act-empty .act-empty-title {
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+.act-empty .act-empty-sub {
+  font-size: 12px;
+  color: var(--fg-faint);
+  max-width: 30rem;
+}
+
+.act-error {
+  margin: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgb(var(--down) / 0.3);
+  background: rgb(var(--down) / 0.06);
+  color: rgb(var(--down));
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.act-error .act-fix {
+  margin-left: auto;
+  flex-shrink: 0;
+}

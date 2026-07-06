@@ -1,0 +1,890 @@
+/* Slice-2 IA rebuild — shell + LIVE/BOTS composition styles. app.css is
+ * append-frozen (W1 shell), so the new IA's classes live here. Reuses
+ * theme tokens only; no reskin (operator: keep the current theme). */
+
+/* ── module status line (top of every LIVE tab) ─────────────────── */
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 28px;
+  padding: 12px 14px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  background: rgb(var(--card) / 0.5);
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.status-item-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-item-val.pos {
+  color: rgb(var(--up));
+}
+.status-item-val.neg {
+  color: rgb(var(--down));
+}
+
+.status-line-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── account avatar (top-right) + full-screen overlay ───────────── */
+.account-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  background: rgb(var(--card) / 0.6);
+  color: var(--fg-dim);
+  cursor: pointer;
+  overflow: visible;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.account-avatar:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.account-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.account-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid rgb(var(--sidebar-bg));
+}
+.account-dot.green {
+  background: var(--green);
+}
+.account-dot.amber {
+  background: var(--amber);
+}
+.account-dot.red {
+  background: var(--red);
+}
+
+.account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: rgb(var(--canvas));
+  animation: overlay-in 180ms ease;
+}
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .account-overlay {
+    animation: none;
+  }
+}
+
+.account-overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: rgb(var(--sidebar-bg) / 0.85);
+  flex-shrink: 0;
+}
+/* Deliberately mode-neutral (red, not the venue accent): the account
+ * overlay is device-wide, and an accent-tinted header read as "still
+ * inside the Solana/Perps module". */
+.account-overlay-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 6px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgb(var(--down));
+  background: rgb(var(--down) / 0.08);
+  border: 1px solid rgb(var(--down) / 0.4);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: filter 120ms ease, transform 120ms ease;
+}
+.account-overlay-back:hover {
+  background: rgb(var(--down) / 0.16);
+  border-color: rgb(var(--down) / 0.6);
+}
+.account-overlay-back:active {
+  transform: translateY(1px);
+}
+.account-overlay-title {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+}
+.account-overlay-sub {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.account-overlay-close {
+  margin-left: auto;
+}
+.account-overlay-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 28px 40px;
+}
+.account-overlay-body > .container {
+  max-width: 940px;
+  margin: 0 auto;
+}
+
+/* ── collapsible (compact activity on LIVE) ─────────────────────── */
+.collapsible {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  background: rgb(var(--card) / 0.3);
+}
+.collapsible-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  cursor: pointer;
+  text-align: left;
+}
+.collapsible-head:hover {
+  background: rgb(var(--card-hover) / 0.4);
+}
+.collapsible-chev {
+  color: var(--fg-faint);
+  transition: transform 160ms ease;
+}
+.collapsible-chev.open {
+  transform: rotate(180deg);
+}
+.collapsible-body {
+  padding: 0 12px 12px;
+}
+
+/* ── emergency flatten ──────────────────────────────────────────── */
+.flatten-btn {
+  border-color: rgb(var(--down) / 0.4);
+  color: rgb(var(--down));
+  background: rgb(var(--down) / 0.08);
+  font-weight: 600;
+}
+.flatten-btn:hover {
+  background: rgb(var(--down) / 0.16);
+  border-color: rgb(var(--down) / 0.6);
+}
+.flatten-results {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.flatten-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+.flatten-row.ok {
+  border-color: rgb(var(--up) / 0.25);
+}
+.flatten-row.fail {
+  border-color: rgb(var(--down) / 0.35);
+  background: rgb(var(--down) / 0.05);
+}
+.flatten-sym {
+  font-weight: 600;
+  color: var(--fg);
+}
+.flatten-detail {
+  margin-left: auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+.flatten-row.fail .flatten-detail {
+  color: rgb(var(--down));
+}
+
+/* ── perps strategy slot ────────────────────────────────────────── */
+.slot-card {
+  margin-top: 4px;
+}
+.slot-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.slot-wallet {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-dim);
+  flex: 1;
+  min-width: 0;
+}
+.slot-wallet-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.slot-wallet-addr {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.slot-wallet-master {
+  color: var(--fg-faint);
+}
+.slot-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(var(--line) / 0.1);
+}
+.slot-filled {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px dashed rgb(var(--line) / 0.24);
+  background: rgb(var(--card) / 0.4);
+}
+.slot-filled.empty {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.slot-filled.conflict {
+  border-color: rgb(var(--down) / 0.4);
+  border-style: solid;
+  background: rgb(var(--down) / 0.05);
+}
+.slot-strategy {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.slot-strategy-name {
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.slot-empty-label {
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+.slot-empty-hint {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.slot-rule {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.slot-loading {
+  color: var(--fg-faint);
+}
+
+/* guided new-API-wallet flow */
+.wallet-steps {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wallet-steps li {
+  display: flex;
+  gap: 12px;
+}
+.wallet-step-n {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(var(--accent-rgb) / 0.4);
+  color: var(--accent);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+.wallet-steps strong {
+  font-size: 13px;
+  color: var(--fg);
+}
+.wallet-steps p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+/* folded presets intro on the BOTS tab */
+.bots-presets-intro {
+  margin-top: 34px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── multi-wallet key material (Account · Security) ─────────────── */
+.wallet-group {
+  margin-top: 16px;
+}
+.wallet-group + .wallet-group {
+  margin-top: 22px;
+}
+.wallet-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.wallet-empty {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.wallet-table {
+  margin-top: 8px;
+}
+.wallet-table td {
+  vertical-align: middle;
+}
+
+/* gateway-only bindings — read-only, no local key to act on */
+.wallet-remote {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed rgb(var(--line) / 0.18);
+  border-radius: 8px;
+  background: rgb(var(--card) / 0.4);
+}
+.wallet-remote-hint {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+.wallet-remote-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wallet-remote-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.wallet-remote-name {
+  color: var(--fg);
+}
+.wallet-remote-addr {
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+.wallet-remote-list .badge {
+  margin-left: auto;
+}
+
+/* inline add-wallet + reveal editors (no modal) */
+.add-wallet {
+  margin: 12px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  background: rgb(var(--card) / 0.5);
+}
+.seg-row {
+  display: flex;
+  gap: 6px;
+}
+.reveal-inline {
+  padding: 12px;
+  border: 1px solid rgb(var(--down) / 0.25);
+  background: rgb(var(--down) / 0.04);
+}
+.reveal-secret {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: rgb(var(--canvas) / 0.7);
+  font-size: 12px;
+  word-break: break-all;
+}
+.reveal-warn {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: rgb(var(--down) / 0.9);
+}
+
+/* ── inline config editor + platform form language (iteration 3) ── */
+.inline-editor {
+  margin: 4px 0 18px;
+  border: 1px solid var(--border-strong);
+  background: rgb(var(--card) / 0.6);
+  box-shadow: 0 0 0 1px rgb(var(--accent-rgb) / 0.08), var(--glow);
+}
+.inline-editor-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.inline-editor-head > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.inline-editor-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.inline-editor-sub {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.inline-editor-body {
+  padding: 8px 16px 4px;
+}
+.inline-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  /* Opaque: the footer sticks to the viewport bottom while the editor
+   * runs past it — a translucent bar reads as broken overlap. */
+  background: rgb(var(--canvas));
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+}
+
+/* grouped subsection */
+.form-group {
+  padding: 14px 0;
+  border-bottom: 1px solid rgb(var(--line) / 0.08);
+}
+.form-group:last-of-type {
+  border-bottom: 0;
+}
+.form-group-head {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--fg-faint);
+  margin-bottom: 10px;
+}
+.form-group-body {
+  display: grid;
+  gap: 12px;
+}
+
+/* labelled full-width field row */
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 420px;
+}
+.field-row-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+.field-row .input {
+  width: 100%;
+}
+.field-row-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.field-static {
+  font-size: 12px;
+  color: var(--fg-2, var(--fg-dim));
+  padding: 6px 0;
+  word-break: break-all;
+}
+.check-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+/* fixed TP levels — compact labelled rows */
+.tp-levels {
+  display: grid;
+  gap: 6px;
+}
+.tp-level-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tp-level-row .input {
+  width: 84px;
+}
+.tp-level-tag {
+  font-size: 11px;
+  color: var(--fg-dim);
+  width: 30px;
+}
+.tp-level-x {
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+/* ── crash guard (ErrorBoundary fallback) ─────────────────────────── */
+.crash-guard {
+  padding: 18px 4px;
+}
+.crash-root {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.crash-card {
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 18px 20px;
+  background: rgb(var(--card) / 0.85);
+  border: 1px solid rgb(var(--line) / 0.16);
+  border-radius: 10px;
+}
+.crash-head {
+  margin-bottom: 10px;
+}
+.crash-lead {
+  font-size: 13px;
+  color: var(--fg-dim);
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+.crash-msg {
+  word-break: break-word;
+}
+.crash-details {
+  margin-top: 12px;
+}
+.crash-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg-faint);
+  user-select: none;
+}
+.crash-stack {
+  margin-top: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: rgb(var(--canvas, 6 7 13) / 0.6);
+  border: 1px solid rgb(var(--line) / 0.12);
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-faint);
+  white-space: pre-wrap;
+}
+.crash-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── v0.3.0 slice 9 — anchored editors, 2-col forms, ladder editor ── */
+
+/* Editors expand IN CONTEXT (spec §D): a connector notch + accent edge
+ * tie the pane to the card/row that opened it. */
+.inline-editor.anchored {
+  position: relative;
+  margin-top: 10px;
+  border-left: 2px solid rgb(var(--accent-rgb) / 0.55);
+}
+.inline-editor.anchored::before {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: 22px;
+  width: 12px;
+  height: 12px;
+  transform: rotate(45deg);
+  background: rgb(var(--card));
+  border-top: 1px solid var(--border-strong);
+  border-left: 1px solid var(--border-strong);
+}
+
+/* Full-width editor row inside a table (the row you clicked stays
+ * highlighted above it). */
+tr.row-editing td {
+  background: rgb(var(--accent-rgb) / 0.05);
+}
+tr.row-editor > td {
+  padding: 0 0 10px;
+  border-bottom: 0;
+}
+tr.row-editor .inline-editor {
+  margin-bottom: 4px;
+}
+
+/* Buttons that toggle an open editor read as pressed. */
+.btn.active {
+  border-color: rgb(var(--accent-rgb) / 0.6);
+  color: var(--accent);
+  background: rgb(var(--accent-rgb) / 0.1);
+}
+
+/* Two-column editor body on wide windows (spec §F). */
+.inline-editor-body.two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  column-gap: 28px;
+}
+@media (min-width: 860px) {
+  .inline-editor-body.two-col {
+    grid-template-columns: 1fr 1fr;
+  }
+  .inline-editor-body.two-col > .error-box {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── the shared TP/SL ladder editor (spec §E) ───────────────────── */
+.ladder-spec {
+  display: grid;
+  gap: 8px;
+}
+.ladder-rung {
+  display: grid;
+  gap: 4px;
+}
+.ladder-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.ladder-tag {
+  width: 40px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.ladder-word {
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.ladder-word.indent,
+.btn.xs.indent {
+  margin-left: 47px;
+}
+.ladder-num {
+  width: 76px;
+  padding: 4px 8px;
+}
+.ladder-num.sm {
+  width: 62px;
+}
+.ladder-newsl {
+  opacity: 0.92;
+}
+.ladder-empty {
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.ladder-actions {
+  margin-top: 2px;
+}
+.ladder-actions .btn {
+  padding: 3px 9px;
+  font-size: 11px;
+}
+/* v0.3.1 S2: aligned rung columns — tag | gain | sell | remove. */
+.ladder-cols {
+  display: grid;
+  grid-template-columns: 44px 104px 104px 30px;
+  gap: 6px 10px;
+  align-items: center;
+}
+.ladder-cols .ladder-tag {
+  width: auto;
+}
+.ladder-head {
+  margin-bottom: -2px;
+}
+.ladder-col-label {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.ladder-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.ladder-cell .ladder-num {
+  width: 100%;
+  min-width: 0;
+}
+.ladder-summary {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--fg-faint);
+}
+/* v0.3.1 P1: three-across conviction override inputs. */
+.tier-pct-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.tier-pct-row .field-row {
+  margin: 0;
+}
+
+/* ── v0.3.2 R4 — Running now (BOTS section 01) + LIVE strip ─────── */
+.run-list {
+  display: flex;
+  flex-direction: column;
+}
+.run-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 9px 2px;
+  border-bottom: 1px solid rgb(var(--line) / 0.08);
+  min-width: 0;
+}
+.run-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 2px;
+}
+.run-kind {
+  flex-shrink: 0;
+  width: 60px;
+}
+.run-main {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.run-main strong {
+  font-size: 13px;
+  color: var(--fg);
+}
+.run-sub {
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-meta {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One-line summary under the LIVE status line; the whole strip is the
+ * jump to the Bots tab. */
+.run-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 14px;
+  margin: 4px 0 0;
+  border: 1px solid var(--border);
+  background: rgb(var(--card) / 0.35);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.run-strip:hover {
+  border-color: var(--border-strong);
+  background: rgb(var(--card-hover) / 0.4);
+}
+.run-strip-text {
+  font-size: 12.5px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.run-strip-go {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--accent);
+  flex-shrink: 0;
+  white-space: nowrap;
+}

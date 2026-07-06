@@ -1,0 +1,18 @@
+/*
+ * Locally bundled fonts — the desktop build must not depend on a CDN.
+ *
+ * Hanken Grotesk 300 is the display weight (large headings, tight
+ * tracking); 400–700 cover body/UI. JetBrains Mono 400–600 is the HUD
+ * microcopy + numbers face. Vite resolves these bare imports from
+ * node_modules and emits the woff2 files into the bundle.
+ */
+
+@import "@fontsource/hanken-grotesk/300.css";
+@import "@fontsource/hanken-grotesk/400.css";
+@import "@fontsource/hanken-grotesk/500.css";
+@import "@fontsource/hanken-grotesk/600.css";
+@import "@fontsource/hanken-grotesk/700.css";
+
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";

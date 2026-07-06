@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "kind": "closePosition",
+  "cloid": "close:0:50:exec-7",
+  "asset": "BTC",
+  "asset_id": 0,
+  "percent": "50",
+  "intent_id": "exec-7"
+}

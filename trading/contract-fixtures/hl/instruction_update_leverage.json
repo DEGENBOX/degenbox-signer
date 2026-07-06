@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "kind": "updateLeverage",
+  "cloid": "lev:0:0x0190f3a1b2c3d4e5f60718293a4b5c70",
+  "asset": "BTC",
+  "asset_id": 0,
+  "leverage": 10,
+  "is_cross": true
+}

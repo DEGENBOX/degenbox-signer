@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "cloid": "0x0190f3a1b2c3d4e5f60718293a4b5c6f",
+  "asset": "kPEPE",
+  "asset_id": 98,
+  "side": "buy",
+  "is_buy": true,
+  "order_kind": "market",
+  "size_usd": "250",
+  "size": "20000",
+  "px": "0.012558",
+  "tif": "Ioc",
+  "leverage": 10,
+  "reduce_only": false,
+  "intent_id": "copy-intent-43",
+  "reference_price": "0.012495",
+  "tp_px": "0.014",
+  "sl_px": "0.011",
+  "max_slippage_bps": 50
+}

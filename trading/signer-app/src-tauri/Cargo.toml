@@ -1,0 +1,104 @@
+[package]
+name = "degenbox-signer-app"
+version = "0.3.4"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "DegenBox Signer — native desktop app wrapping the local Solana + Hyperliquid signer."
+
+[lib]
+# Tauri convention: a cdylib so the mobile-runtime can dlopen the app
+# even though we ship desktop today. Costs nothing on desktop builds.
+name = "degenbox_signer_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "degenbox-signer-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Shared signer primitives — both HL agent + Solana hot wallet,
+# encrypted keystore, OS-keychain integration, the full HL execution
+# stack (`hl-exec`: signing/server/info/exec-state/audit/daemon), and
+# the 127.0.0.1:5829 signer-protocol daemon (`localhost-daemon`) the
+# web app probes to detect this desktop client.
+degenbox-signer-core = { path = "../../signer-core", features = [
+    "keychain",
+    "hl-exec",
+    "localhost-daemon",
+] }
+
+# HL EIP-712 signing + /exchange transport — the SAME library the
+# `hl-signer-desktop` CLI uses, so the wire shape is byte-identical
+# end-to-end. This is what makes the app a true HL executor, not just a
+# keystore holder.
+platform-hl-exchange = { path = "../../../crates/platform/hl-exchange" }
+
+# Tauri 2 stable. The `wry` webview is bundled; on macOS that's
+# WKWebView, on Windows WebView2 (system-installed), on Linux
+# webkit2gtk-4.1.
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+# Auto-update via ed25519-signed GH releases manifest.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# Single-instance guard — clicking the .app twice focuses the running
+# window instead of spinning up a second daemon process.
+tauri-plugin-single-instance = "2"
+# Deep-link callback target for the `/hl/setup` browser hand-off.
+tauri-plugin-deep-link = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Used by the import flow for Solana wallet bytes (base58 or hex).
+bs58 = "0.5"
+hex = "0.4"
+# Discord desktop-auth PKCE flow: random verifier + sha256 challenge,
+# base64url wire encoding.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+# Wipe freshly generated seeds after they're vaulted (same crate
+# signer-core uses for the keystore plaintext).
+zeroize = "1"
+# HL size/price math + payload decimals — same crate + features the CLI
+# signer uses so rounding behaviour is identical.
+rust_decimal = { version = "1.36", features = ["serde"] }
+# Trait-objects for the `/info` client (test fakes + the real HTTP impl).
+async-trait = "0.1"
+# Atomic config writes so a crash mid-write can't corrupt the HL config.
+tempfile = "3"
+# Pulled in by `signer-core` already — listed explicitly so the
+# `SeedDerivable` trait import in commands.rs has a canonical path.
+# Pin to the same minor as signer-core.
+solana-sdk = "2.1"
+
+[dev-dependencies]
+# Ergonomic decimal literals in the signing/info unit tests.
+rust_decimal_macros = "1.36"
+
+[features]
+# Default to nothing tauri-specific so `cargo check` from a hostile
+# CI shell (no WebKit) still type-checks the Rust commands.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# solana-secp256r1-program (via solana-sdk) pulls openssl. Windows CI runners
+# have no system OpenSSL, so vendor it (build from source) on that target only.
+# Same pattern as the hl-signer-desktop windows-sys dep.
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

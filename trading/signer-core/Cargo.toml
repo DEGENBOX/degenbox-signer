@@ -1,0 +1,119 @@
+[package]
+name = "degenbox-signer-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Self-custody Solana signer core. Compiles to WASM (extension) and native (desktop)."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Light-touch surface — every dep is auditable surface area.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+zeroize = { version = "1", features = ["derive"] }
+
+# Crypto for the keystore. Argon2id derives a key from the user's
+# password; aes-gcm encrypts the actual ed25519 secret + a magic + a
+# version tag. Both are well-vetted crates with no_std support.
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+hex = "0.4"
+# sha256 for the self-update manifest verifier (verifies downloaded
+# binaries against the published hash before swap).
+sha2 = "0.10"
+
+# HL secp256k1 + keccak address derivation. The HL primitives are
+# small relative to solana-sdk and folding them in keeps downstream
+# Cargo.toml's noise-free — one path-dep, both chains.
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
+sha3 = "0.10"
+tempfile = "3"
+
+# OS keychain integration. Gated so the WASM extension build doesn't
+# try to link a libsecret/keychain backend it can't use anyway.
+# Native desktop targets (Tauri app + CLI) opt in via `keychain`.
+keyring = { version = "3", optional = true }
+
+# HL execution stack (feature `hl-exec`): EIP-712 signing + /exchange
+# transport — the SAME library hl-signer-desktop uses, so the wire
+# shape is byte-identical end-to-end. Optional so Solana-only builds
+# (extension, signer-cli) don't pull the backend path-dep.
+platform-hl-exchange = { path = "../../crates/platform/hl-exchange", optional = true }
+# HL size/price math + payload decimals — same crate + features the
+# CLI signer uses so rounding behaviour is identical.
+rust_decimal = { version = "1.36", features = ["serde"], optional = true }
+# Trait-objects for the HL `/info` client (test fakes + the real HTTP impl).
+async-trait = { version = "0.1", optional = true }
+
+# Localhost signer-protocol daemon (feature `localhost-daemon`): the
+# 127.0.0.1:5829 HTTP server the web app probes to detect a desktop
+# signer. Same axum/tower-http pins as signer-desktop's daemon.
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+
+# Solana SDK for keypair handling + versioned transaction signing.
+# Heavy (50+ transitive deps) but canonical — rolling our own
+# transaction encoder is a security-audit nightmare.
+solana-sdk = "2.1"
+# bincode v1 is the wire format Solana uses for VersionedTransaction.
+# v2 is incompatible — the solana-sdk bumps will pull in their own.
+bincode = "1.3"
+
+# Base58 (matches solana-sdk's bs58 = "0.5")
+bs58 = "0.5"
+
+# HTTP for Jupiter quote/swap + gateway relay submit.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+base64 = "0.22"
+
+# bot-engine uses calendar-aware timestamps for signal age. solana-sdk
+# pulls in chrono transitively; declaring it explicitly means a future
+# solana-sdk trim doesn't silently break the bot.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
+# WebSocket client for the gateway push path (alpha.signals.matched.*).
+# `tokio-tungstenite` is the standard non-blocking WS client; we use
+# rustls-native-tls so the same binary works without OS cert store quirks.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+url = "2"
+# Used to parse the `sub` claim from `GET /auth/me` + to surface the
+# user-id on sell-needed events. Lightweight + matches the gateway's
+# uuid version.
+uuid = { version = "1", features = ["serde", "v4"] }
+tracing = "0.1"
+
+[features]
+default = []
+# WASM target: signer-extension builds with this; today native-only.
+wasm = []
+native = []
+# OS credential store integration (keychain / Credential Manager /
+# secret-service). Tauri desktop app enables this; CLI + extension do
+# not by default.
+keychain = ["dep:keyring"]
+# Hyperliquid execution stack: payload signing, gateway client,
+# /info client, executed-marker idempotency ledger, audit log, and the
+# poll/sign/report daemon core. The canonical implementation —
+# signer-app consumes this; hl-signer-desktop keeps its own (prod)
+# copy until its deprecation is decided.
+hl-exec = ["dep:platform-hl-exchange", "dep:rust_decimal", "dep:async-trait"]
+# The 127.0.0.1:5829 signer-protocol HTTP daemon (web-app detection
+# surface). Tauri app enables this; the extension build never does.
+localhost-daemon = ["dep:axum", "dep:tower-http"]
+
+[dev-dependencies]
+# Ergonomic decimal literals in the HL signing/info unit tests.
+rust_decimal_macros = "1.36"
+
+# Signer-core is intentionally NOT a member of the root backend workspace.
+# It will become its own public, audited repo. Empty [workspace] marker
+# keeps cargo from inheriting the parent.
+[workspace]

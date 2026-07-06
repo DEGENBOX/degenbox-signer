@@ -1,0 +1,14 @@
+# Tauri 2 desktop signer app — own workspace marker because the
+# parent backend workspace pulls in sqlx + axum + a thousand other
+# crates that are irrelevant here, and we want the app to build
+# standalone on user-facing CI matrix runners.
+
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false

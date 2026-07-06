@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "kind": "placeTpsl",
+  "cloid": "sl:98:0x0190f3a1b2c3d4e5f60718293a4b5c72",
+  "asset": "kPEPE",
+  "asset_id": 98,
+  "tp_sl": "sl",
+  "trigger_px": "0.011",
+  "close_percent": "100",
+  "intent_id": "trailing-sl::00000000-0000-0000-0000-000000000001::kPEPE::0x0190f3a1b2c3d4e5f60718293a4b5c73"
+}

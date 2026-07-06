@@ -1,0 +1,52 @@
+/*
+ * Tailwind entry — utilities only become real CSS where used (JIT), so
+ * importing this is visually inert until components opt in.
+ *
+ * Import order matters: this loads BEFORE app.css in main.tsx so the
+ * app's hand-written rules keep winning any specificity ties while the
+ * preflight reset stays underneath everything.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Preflight neutralizer — W0.1 workspace merge must be pixel-identical.
+ * app.css was written against UA defaults (no Tailwind), so the few
+ * preflight resets it does NOT already mirror are reverted here:
+ *   - replaced elements: preflight makes svg/img display:block, which
+ *     would reflow every lucide icon sitting in plain text flow;
+ *   - img/video max-width/height clamps;
+ *   - ::placeholder recolor (gray-400) — app.css leaves UA placeholder;
+ *   - checkbox/radio margin:0 — unclassed checkboxes rely on UA margin.
+ * Lives in @layer base so Tailwind utilities AND unlayered app.css rules
+ * still override. W0.2 (theme rebuild) may delete this block once the
+ * app is restyled tailwind-first.
+ */
+@layer base {
+  img,
+  svg,
+  video,
+  canvas,
+  audio,
+  iframe,
+  embed,
+  object {
+    display: revert;
+    vertical-align: revert;
+  }
+  img,
+  video {
+    max-width: revert;
+    height: revert;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: revert;
+    opacity: revert;
+  }
+  input[type="checkbox"],
+  input[type="radio"] {
+    margin: revert;
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DegenBox Signer",
+  "version": "0.3.4",
+  "identifier": "app.degenbox.signer",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "DegenBox Signer",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' tauri:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ipc: http://ipc.localhost https://api-v2.degenbox.app https://api.degenbox.app https://api.hyperliquid.xyz https://quote-api.jup.ag"
+    },
+    "macOSPrivateApi": true,
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/tray-idle.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false,
+      "title": "DegenBox"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "targets": ["dmg", "app", "msi", "nsis", "deb", "appimage"],
+    "category": "Finance",
+    "copyright": "Copyright (c) DegenBox 2026",
+    "shortDescription": "DegenBox local signer — self-custody Solana + Hyperliquid trading.",
+    "longDescription": "Native desktop signer for DegenBox. Holds an encrypted local copy of your Hyperliquid agent key + Solana hot-wallet, signs orders queued by the DegenBox cloud, and reports back. Keys never leave your device.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "frameworks": [],
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "wix": {
+        "language": "en-US",
+        "template": null
+      },
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "__note": "UPDATER DISABLED for the unsigned first releases — re-enable with a real keypair before public release. Steps: (1) `pnpm tauri signer generate -w ~/.tauri/degenbox-signer.key`, (2) paste the printed PUBLIC key into `pubkey` below, (3) restore `endpoints` to [\"https://github.com/DEGENBOX/degenbox-v2/releases/latest/download/latest.json\"], (4) set `bundle.createUpdaterArtifacts` to true, (5) add TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) secrets and re-enable the env lines in .github/workflows/release-signer-app.yml. The config object itself must stay present: tauri-plugin-updater is registered in lib.rs and app startup fails if `plugins.updater` is missing. Empty `endpoints` makes the Settings 'Check for updates' button return a caught, harmless error instead of verifying against a bogus key.",
+      "active": false,
+      "endpoints": [],
+      "dialog": false,
+      "pubkey": ""
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["degenbox"]
+      }
+    }
+  }
+}

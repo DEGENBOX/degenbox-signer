@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "kind": "vaultTransfer",
+  "cloid": "vt:d:0x0190f3a1b2c3d4e5f60718293a4b5c71",
+  "vault_address": "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303",
+  "is_deposit": true,
+  "usd": 100000000
+}

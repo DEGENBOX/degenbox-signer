@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "cloid": "0x0190f3a1b2c3d4e5f60718293a4b5c6e",
+  "asset": "ETH",
+  "asset_id": 4,
+  "side": "sell",
+  "is_buy": false,
+  "order_kind": "market",
+  "size_usd": "500",
+  "size": "0.25",
+  "px": "1990",
+  "tif": "Ioc",
+  "leverage": null,
+  "reduce_only": true,
+  "intent_id": "copy-intent-42",
+  "reference_price": "2000",
+  "tp_px": null,
+  "sl_px": null,
+  "max_slippage_bps": 50
+}
