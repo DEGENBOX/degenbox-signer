@@ -20,3 +20,4 @@ pub mod compute_budget;
 pub mod pumpfun;
 pub mod pumpfun_amm;
 pub mod raydium_amm_v4;
+pub mod tip;

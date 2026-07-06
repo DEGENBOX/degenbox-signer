@@ -136,6 +136,16 @@ export interface AccessCheck {
     /** Unix seconds */
     exp?: number;
   } | null;
+  /** Solana paper/live state, piggybacked on the same probe (mirrors
+   * the gateway's `GET /api/trading/sol-mode`). `effective_live ===
+   * false` ⇒ Solana trades are simulated, never broadcast — the shell
+   * shows the "paper" badge next to the health pill in Sol mode.
+   * Absent/null when the fetch failed — badge stays off. */
+  sol_mode?: {
+    user_live: boolean;
+    global_live: boolean;
+    effective_live: boolean;
+  } | null;
 }
 
 // ─── Solana surface types (must match src-tauri/src/sol/) ────────

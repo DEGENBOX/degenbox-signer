@@ -28,6 +28,7 @@ import { useHlBotActivity, useSolBotActivity } from "./useBotActivity";
 import {
   hlKindLabel,
   hlLifecycle,
+  solIsPaperRow,
   solLifecycle,
   solReasonLabel,
   solSourceLabel,
@@ -405,13 +406,19 @@ function solToVM(row: SolActivityRow): FeedVM {
       : row.side === "sell"
         ? "sell"
         : "neutral";
-  const actionLabel = isSkip
+  // Paper-honesty: stub-path rows were never broadcast — label the
+  // copy/sell as paper (amber detail, no explorer link on the synthetic
+  // signature) so a simulated trade can't masquerade as a real one that
+  // failed.
+  const paper = solIsPaperRow(row);
+  const baseLabel = isSkip
     ? "Skipped"
     : row.side === "buy"
       ? "Buy"
       : row.side === "sell"
         ? "Sell"
         : "Order";
+  const actionLabel = !isSkip && paper ? `${baseLabel} (paper)` : baseLabel;
 
   const lamports = row.amount_in_lamports;
   const size =
@@ -426,6 +433,18 @@ function solToVM(row: SolActivityRow): FeedVM {
     detail = (
       <span className="act-dim" title={row.reason ?? undefined}>
         {solReasonLabel(row.reason)}
+      </span>
+    );
+  } else if (paper) {
+    detail = (
+      <span
+        className="act-warn"
+        title={
+          row.reason ??
+          "paper mode — this trade was simulated and never broadcast on-chain"
+        }
+      >
+        {row.reason ?? "paper — not broadcast"}
       </span>
     );
   } else if (row.reason) {

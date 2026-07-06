@@ -42,6 +42,7 @@
 //! RPC and supplies the slippage bounds. Pure encoder + PDA derivation,
 //! audit-friendly.
 
+use crate::dex::tip::{self, TipProvider, TipSelector};
 use crate::dex::{ata, compute_budget};
 use solana_sdk::hash::Hash;
 use solana_sdk::instruction::{AccountMeta, Instruction};
@@ -439,6 +440,17 @@ pub struct BuyTxParams {
     /// micro-lamports per CU. Sized from `/api/trading/stats/priority-fee`
     /// p75 in prod; default ~50_000 is fine for non-contested slots.
     pub compute_unit_price_micro_lamports: u64,
+    /// Submit-provider tip. `None` (default) → no tip ix, byte-identical
+    /// to the pre-tip RPC path. `Falcon`/`Jito` inject an in-tx System
+    /// `transfer` to a provider tip account so the submit is accepted /
+    /// prioritized. See [`crate::dex::tip`].
+    pub tip_provider: TipProvider,
+    /// Requested tip in lamports. Falcon raises sub-minimum values to
+    /// [`crate::dex::tip::FALCON_MIN_TIP_LAMPORTS`].
+    pub tip_lamports: u64,
+    /// Deterministic tip-address chooser (seedable for reproducible
+    /// builds / tests).
+    pub tip_selector: TipSelector,
     /// When true, omit the `create_idempotent_ix` for the token ATA.
     /// Set by the caller from an `AtaCache` lookup — saves ~3.5k CU
     /// and ~120 bytes of tx payload per repeat buy on the same
@@ -455,6 +467,34 @@ pub enum BuildTxError {
     Compile(String),
     #[error("bincode serialise failed: {0}")]
     Bincode(String),
+    #[error("tip injection failed: {0}")]
+    Tip(#[from] tip::TipError),
+}
+
+/// Append the provider-tip `transfer` to `ixs` when the params request
+/// one. Logs the effective tip (post Falcon-minimum raise) and warns if
+/// the tip meets/exceeds the trade's own SOL budget (still sent — the
+/// operator opted into it via submit-mode; never silently zeroes the
+/// trade). Shared by buy + sell builders.
+fn push_tip_ix(
+    ixs: &mut Vec<Instruction>,
+    user: &Pubkey,
+    provider: TipProvider,
+    tip_lamports: u64,
+    trade_lamports: u64,
+    selector: TipSelector,
+) -> Result<(), BuildTxError> {
+    if let Some((ix, used)) = tip::tip_transfer_ix(user, provider, tip_lamports, selector)? {
+        if used >= trade_lamports && trade_lamports > 0 {
+            tracing::warn!(
+                tip_lamports = used,
+                trade_lamports,
+                "provider tip ≥ trade size — sending anyway (operator opted in)"
+            );
+        }
+        ixs.push(ix);
+    }
+    Ok(())
 }
 
 /// Build an unsigned v0 VersionedTransaction for a PumpFun buy. Returns
@@ -501,6 +541,14 @@ pub fn build_buy_tx(p: &BuyTxParams) -> Result<Vec<u8>, BuildTxError> {
         expected_out,
         max_sol_cost,
     ));
+    push_tip_ix(
+        &mut ixs,
+        &p.user,
+        p.tip_provider,
+        p.tip_lamports,
+        p.sol_in_lamports,
+        p.tip_selector,
+    )?;
 
     compile_tx(&p.user, ixs, p.recent_blockhash)
 }
@@ -523,6 +571,13 @@ pub struct SellTxParams {
     pub recent_blockhash: Hash,
     pub compute_unit_limit: u32,
     pub compute_unit_price_micro_lamports: u64,
+    /// Submit-provider tip — see [`BuyTxParams::tip_provider`]. SELLs
+    /// tip too so exits are prioritized identically to entries; tip
+    /// logic never blocks a sell (a tip failure is a build error the
+    /// caller can fall back on, never a silent no-exit).
+    pub tip_provider: TipProvider,
+    pub tip_lamports: u64,
+    pub tip_selector: TipSelector,
 }
 
 pub fn build_sell_tx(p: &SellTxParams) -> Result<Vec<u8>, BuildTxError> {
@@ -534,7 +589,7 @@ pub fn build_sell_tx(p: &SellTxParams) -> Result<Vec<u8>, BuildTxError> {
     .ok_or(BuildTxError::QuoteUnavailable)?;
     let min_sol_output = apply_slippage(expected_sol, p.slippage_bps, false);
 
-    let ixs = vec![
+    let mut ixs = vec![
         compute_budget::set_compute_unit_limit(p.compute_unit_limit),
         compute_budget::set_compute_unit_price(p.compute_unit_price_micro_lamports),
         build_sell_ix(
@@ -546,6 +601,16 @@ pub fn build_sell_tx(p: &SellTxParams) -> Result<Vec<u8>, BuildTxError> {
             min_sol_output,
         ),
     ];
+    // trade_lamports = 0: sells have no SOL-in budget to compare against,
+    // so the "tip ≥ trade" warning never fires on exits.
+    push_tip_ix(
+        &mut ixs,
+        &p.user,
+        p.tip_provider,
+        p.tip_lamports,
+        0,
+        p.tip_selector,
+    )?;
 
     compile_tx(&p.user, ixs, p.recent_blockhash)
 }
@@ -563,7 +628,10 @@ fn compile_tx(
         signatures: vec![Default::default()],
         message: VersionedMessage::V0(msg),
     };
-    bincode::serialize(&unsigned).map_err(|e| BuildTxError::Bincode(e.to_string()))
+    let bytes = bincode::serialize(&unsigned).map_err(|e| BuildTxError::Bincode(e.to_string()))?;
+    // Fail-closed if the tip pushed us over the provider size budget.
+    tip::check_tx_size(&bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1010,6 +1078,9 @@ mod tests {
             recent_blockhash: solana_sdk::hash::Hash::default(),
             compute_unit_limit: 150_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_token_ata_create: false,
         }
     }
@@ -1026,6 +1097,35 @@ mod tests {
             _ => panic!("expected v0 message"),
         }
         assert_eq!(tx.signatures.len(), 1);
+    }
+
+    #[test]
+    fn build_buy_tx_none_provider_is_byte_identical_to_pre_tip() {
+        // The None path must add NOTHING — same instruction count as
+        // before the tip feature (cu-limit + cu-price + ATA + buy = 4).
+        let p = buy_params();
+        assert_eq!(p.tip_provider, TipProvider::None);
+        let bytes = build_buy_tx(&p).expect("build_buy_tx");
+        let tx: VersionedTransaction = bincode::deserialize(&bytes).unwrap();
+        match &tx.message {
+            VersionedMessage::V0(m) => assert_eq!(m.instructions.len(), 4),
+            _ => panic!("expected v0"),
+        }
+    }
+
+    #[test]
+    fn build_buy_tx_falcon_appends_tip_transfer() {
+        let mut p = buy_params();
+        p.tip_provider = TipProvider::Falcon;
+        p.tip_lamports = 1_000_000;
+        p.tip_selector = TipSelector::new(2);
+        let bytes = build_buy_tx(&p).expect("build_buy_tx");
+        let tx: VersionedTransaction = bincode::deserialize(&bytes).unwrap();
+        match &tx.message {
+            // 5 = the 4 base ixs + tip transfer.
+            VersionedMessage::V0(m) => assert_eq!(m.instructions.len(), 5),
+            _ => panic!("expected v0"),
+        }
     }
 
     #[test]
@@ -1055,6 +1155,9 @@ mod tests {
             recent_blockhash: solana_sdk::hash::Hash::default(),
             compute_unit_limit: 120_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
         };
         let bytes = build_sell_tx(&p).expect("build_sell_tx");
         let tx: VersionedTransaction = bincode::deserialize(&bytes).unwrap();

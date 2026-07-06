@@ -32,7 +32,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pause, Play, ShieldCheck } from "lucide-react";
-import { ipc, type HlStatus, type StatusReport } from "./ipc";
+import { ipc, type AccessCheck, type HlStatus, type StatusReport } from "./ipc";
+
+type AccessCheckSolMode = AccessCheck["sol_mode"];
 import { getMode, setMode, type Mode } from "./styles/mode";
 import { Onboarding } from "./pages/Onboarding";
 import { Unlock } from "./pages/Unlock";
@@ -84,6 +86,11 @@ export function App() {
   const [lockReason, setLockReason] = useState<string | null>(null);
   const [lockDetail, setLockDetail] = useState<string | null>(null);
   const accessLostRef = useRef(false);
+  // Solana paper/live state, piggybacked on the access probe (no extra
+  // polling loop). `effective_live === false` → "paper" badge next to
+  // the health pill while in Sol mode — the desktop twin of the HL
+  // `hl.paper_mode` badge and of the web SolModePill.
+  const [solMode, setSolMode] = useState<NonNullable<AccessCheckSolMode> | null>(null);
 
   const setTab = useCallback((t: Tab) => {
     setTabState(t);
@@ -148,6 +155,10 @@ export function App() {
 
   // Slow path: gateway /auth/me probe every 5 minutes (also runs while
   // locked, so a restored sub clears the episode before re-unlock).
+  // The probe also carries the Solana paper/live state (`sol_mode`,
+  // fetched server-side on the same cycle) — re-run on a mode switch so
+  // the paper badge is fresh when the user lands on the Sol surface,
+  // without adding a dedicated polling loop.
   useEffect(() => {
     let alive = true;
     const probe = async () => {
@@ -157,6 +168,7 @@ export function App() {
         if (r.state === "ok") {
           accessLostRef.current = false;
           setAccessLost(false);
+          setSolMode(r.sol_mode ?? null);
         } else if (r.state === "revoked") {
           onAccessLoss(r.detail);
         }
@@ -172,7 +184,7 @@ export function App() {
       alive = false;
       clearInterval(id);
     };
-  }, [onAccessLoss]);
+  }, [onAccessLoss, mode]);
 
   // Fast path: the Sol runtime flips `auth_expired` the moment a live
   // gateway call answers 401/403 (stream upgrade, relay REST). That
@@ -346,7 +358,24 @@ export function App() {
             title={`Signer daemon: ${healthLabel}`}
           >
             {healthLabel}
-            {hl?.paper_mode && <span className="badge warn">paper</span>}
+            {/* Venue-scoped paper badge: HL's own paper_mode in Perps
+                mode; the gateway's Solana effective mode in Sol mode
+                (paper = trades simulate, never broadcast on-chain). */}
+            {mode === "perps" && hl?.paper_mode && (
+              <span className="badge warn">paper</span>
+            )}
+            {mode === "sol" && solMode && !solMode.effective_live && (
+              <span
+                className="badge warn"
+                title={
+                  solMode.user_live && !solMode.global_live
+                    ? "Solana paper: you opted into live, but the deployment ceiling (SOL_EXCHANGE_MODE) is paper — trades are simulated, never broadcast."
+                    : "Solana paper mode: trades are simulated and never broadcast on-chain. Enable live trading from the web app's Mode pill to trade for real."
+                }
+              >
+                paper
+              </span>
+            )}
           </div>
           <button
             className={`btn ${paused ? "paused-state" : ""}`}

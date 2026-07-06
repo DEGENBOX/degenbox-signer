@@ -501,6 +501,18 @@ pub async fn discord_unlink(
 // and 5xx are deliberately NOT access loss — never lock a trader out
 // because the wifi blipped.
 
+/// This user's Solana paper/live verdict, mirrored from the gateway's
+/// `GET /api/trading/sol-mode` (`module-trading::api::sol_mode::
+/// SolModeView`). `effective_live == false` ⇒ every Solana trade this
+/// account fires goes through the non-broadcasting stub — the shell
+/// shows the same "paper" badge the HL side already has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolModeDto {
+    pub user_live: bool,
+    pub global_live: bool,
+    pub effective_live: bool,
+}
+
 /// Result of one gateway access probe.
 #[derive(Debug, Serialize)]
 pub struct AccessCheck {
@@ -516,6 +528,11 @@ pub struct AccessCheck {
     /// Account tab reads roles/expiry from here; shape stays the
     /// gateway's, the GUI reads fields defensively.
     pub me: Option<serde_json::Value>,
+    /// Solana paper/live state, piggybacked on the SAME probe request
+    /// cycle (UX-honesty wave: the shell needs to badge paper mode but
+    /// must not grow a new polling loop). Best-effort: `None` when the
+    /// fetch fails or the route is gated — the badge simply stays off.
+    pub sol_mode: Option<SolModeDto>,
 }
 
 #[tauri::command]
@@ -527,6 +544,7 @@ pub async fn access_check(state: tauri::State<'_, AppState>) -> Result<AccessChe
                 state: "no_auth",
                 detail: Some(e),
                 me: None,
+                sol_mode: None,
             })
         }
     };
@@ -542,6 +560,7 @@ pub async fn access_check(state: tauri::State<'_, AppState>) -> Result<AccessChe
                 state: "unreachable",
                 detail: Some(format!("GET /auth/me: {e}")),
                 me: None,
+                sol_mode: None,
             })
         }
     };
@@ -551,10 +570,24 @@ pub async fn access_check(state: tauri::State<'_, AppState>) -> Result<AccessChe
         // tab can show roles/expiry. A decode failure is not an access
         // problem — credentials were accepted.
         let me = resp.json::<serde_json::Value>().await.ok();
+        // Piggyback the Solana paper/live state on the same probe so
+        // the shell can badge paper mode without a new polling loop.
+        // Best-effort: any failure (network, non-2xx, decode) just
+        // leaves the badge off — never affects the access verdict.
+        let sol_mode = match client
+            .get(format!("{}/api/trading/sol-mode", auth.base))
+            .bearer_auth(&auth.token)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r.json::<SolModeDto>().await.ok(),
+            _ => None,
+        };
         return Ok(AccessCheck {
             state: "ok",
             detail: None,
             me,
+            sol_mode,
         });
     }
     let body = resp.text().await.unwrap_or_default();
@@ -572,6 +605,7 @@ pub async fn access_check(state: tauri::State<'_, AppState>) -> Result<AccessChe
                     .into(),
             ),
             me: None,
+            sol_mode: None,
         });
     }
     if code == 401 || code == 403 {
@@ -580,12 +614,14 @@ pub async fn access_check(state: tauri::State<'_, AppState>) -> Result<AccessChe
             state: "revoked",
             detail: Some(format!("gateway {code}: {body}")),
             me: None,
+            sol_mode: None,
         });
     }
     Ok(AccessCheck {
         state: "unreachable",
         detail: Some(format!("gateway {code}: {body}")),
         me: None,
+        sol_mode: None,
     })
 }
 

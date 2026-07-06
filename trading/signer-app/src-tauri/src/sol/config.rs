@@ -69,6 +69,11 @@ fn config_path() -> Result<PathBuf, String> {
         .join("sol-config.json"))
 }
 
+/// Submit modes the gateway's `SubmitMode` enum actually accepts. A
+/// value outside this set makes EVERY intent create fail with a silent
+/// 422 (live incident 2026-07-06: a since-removed UI offered "tpu").
+const WIRE_SUBMIT_MODES: &[&str] = &["falcon", "falcon_jito", "max_race"];
+
 impl SolConfig {
     pub fn load_or_default() -> Self {
         let Ok(path) = config_path() else {
@@ -77,7 +82,17 @@ impl SolConfig {
         let Ok(bytes) = std::fs::read(&path) else {
             return Self::default();
         };
-        serde_json::from_slice(&bytes).unwrap_or_default()
+        let mut cfg: Self = serde_json::from_slice(&bytes).unwrap_or_default();
+        // Self-heal configs written while the UI offered wire-invalid
+        // modes — otherwise every order 422s until the user re-saves.
+        if !WIRE_SUBMIT_MODES.contains(&cfg.submit_mode.as_str()) {
+            tracing::warn!(
+                bad = %cfg.submit_mode,
+                "sol-config submit_mode is not wire-valid — falling back to falcon_jito"
+            );
+            cfg.submit_mode = default_submit_mode();
+        }
+        cfg
     }
 
     /// Atomic write (tempfile + rename) so a crash mid-write can't

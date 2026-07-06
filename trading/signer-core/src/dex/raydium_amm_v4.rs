@@ -51,6 +51,7 @@
 //! SDK references and independent MEV bots consistently use offset 336
 //! for `token_coin` — we guard this with a decoder round-trip test.
 
+use crate::dex::tip::{self, TipProvider, TipSelector};
 use crate::dex::{ata, compute_budget};
 use solana_sdk::hash::Hash;
 use solana_sdk::instruction::{AccountMeta, Instruction};
@@ -203,6 +204,32 @@ pub enum BuildTxError {
     Compile(String),
     #[error("bincode: {0}")]
     Bincode(String),
+    #[error("tip injection failed: {0}")]
+    Tip(#[from] tip::TipError),
+}
+
+/// Append the provider-tip `transfer` to `ixs` when requested. Warns if
+/// the tip ≥ the trade budget (still sent — operator opted in). Shared
+/// by buy + sell. `trade_lamports == 0` for sells.
+fn push_tip_ix(
+    ixs: &mut Vec<Instruction>,
+    user: &Pubkey,
+    provider: TipProvider,
+    tip_lamports: u64,
+    trade_lamports: u64,
+    selector: TipSelector,
+) -> Result<(), BuildTxError> {
+    if let Some((ix, used)) = tip::tip_transfer_ix(user, provider, tip_lamports, selector)? {
+        if used >= trade_lamports && trade_lamports > 0 {
+            tracing::warn!(
+                tip_lamports = used,
+                trade_lamports,
+                "provider tip ≥ trade size — sending anyway (operator opted in)"
+            );
+        }
+        ixs.push(ix);
+    }
+    Ok(())
 }
 
 // ─── Decoders ────────────────────────────────────────────────────────
@@ -379,6 +406,12 @@ pub struct BuyTxParams {
     pub recent_blockhash: Hash,
     pub compute_unit_limit: u32,
     pub compute_unit_price_micro_lamports: u64,
+    /// Submit-provider tip. `None` → byte-identical to the pre-tip RPC
+    /// path. `Falcon`/`Jito` inject an in-tx System `transfer` to a
+    /// provider tip account. See [`crate::dex::tip`].
+    pub tip_provider: TipProvider,
+    pub tip_lamports: u64,
+    pub tip_selector: TipSelector,
     /// Suppress `CreateIdempotent` for the coin (token) ATA when an
     /// `AtaCache` lookup confirms it already exists.
     pub skip_coin_ata_create: bool,
@@ -402,6 +435,11 @@ pub struct SellTxParams {
     pub recent_blockhash: Hash,
     pub compute_unit_limit: u32,
     pub compute_unit_price_micro_lamports: u64,
+    /// Submit-provider tip — see [`BuyTxParams::tip_provider`]. Exits
+    /// tip too; tip logic never blocks a sell.
+    pub tip_provider: TipProvider,
+    pub tip_lamports: u64,
+    pub tip_selector: TipSelector,
     /// Suppress `CreateIdempotent` for the pc (WSOL) ATA receiver.
     pub skip_pc_ata_create: bool,
 }
@@ -473,6 +511,14 @@ pub fn build_buy_tx(p: &BuyTxParams) -> Result<Vec<u8>, BuildTxError> {
         // Unwrap leftovers + rent back to native SOL.
         ixs.push(ata::close_account_ix(&pc_ata, &p.user, &p.user));
     }
+    push_tip_ix(
+        &mut ixs,
+        &p.user,
+        p.tip_provider,
+        p.tip_lamports,
+        p.quote_in_lamports,
+        p.tip_selector,
+    )?;
     compile_tx(&p.user, ixs, p.recent_blockhash)
 }
 
@@ -522,6 +568,14 @@ pub fn build_sell_tx(p: &SellTxParams) -> Result<Vec<u8>, BuildTxError> {
         // Unwrap the SOL proceeds to native balance.
         ixs.push(ata::close_account_ix(&pc_ata, &p.user, &p.user));
     }
+    push_tip_ix(
+        &mut ixs,
+        &p.user,
+        p.tip_provider,
+        p.tip_lamports,
+        0,
+        p.tip_selector,
+    )?;
     compile_tx(&p.user, ixs, p.recent_blockhash)
 }
 
@@ -536,7 +590,9 @@ fn compile_tx(
         signatures: vec![Default::default()],
         message: VersionedMessage::V0(msg),
     };
-    bincode::serialize(&unsigned).map_err(|e| BuildTxError::Bincode(e.to_string()))
+    let bytes = bincode::serialize(&unsigned).map_err(|e| BuildTxError::Bincode(e.to_string()))?;
+    tip::check_tx_size(&bytes)?;
+    Ok(bytes)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -924,6 +980,9 @@ mod tests {
             recent_blockhash: Hash::default(),
             compute_unit_limit: 250_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_coin_ata_create: false,
             skip_pc_ata_create: false,
         };
@@ -938,6 +997,9 @@ mod tests {
             recent_blockhash: Hash::default(),
             compute_unit_limit: 200_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_pc_ata_create: false,
         };
         Some((buy, sell))
@@ -960,6 +1022,27 @@ mod tests {
                 // cu-limit + cu-price + ATA(coin) + ATA(pc) + swapBaseIn = 5
                 assert_eq!(m.instructions.len(), 5);
             }
+            _ => panic!("expected v0 message"),
+        }
+    }
+
+    #[test]
+    fn build_buy_tx_falcon_appends_tip_transfer() {
+        let market_pk = Pubkey::new_unique();
+        let nonce =
+            (0u64..=255).find(|n| vault_signer_pda(&market_pk, *n, &OPEN_BOOK_PROGRAM_ID).is_ok());
+        let nonce = match nonce {
+            Some(n) => n,
+            None => return,
+        };
+        let (mut buy_p, _) = build_test_params(nonce, market_pk).unwrap();
+        buy_p.tip_provider = TipProvider::Falcon;
+        buy_p.tip_lamports = 1_000_000;
+        let bytes = build_buy_tx(&buy_p).expect("build_buy_tx");
+        let tx: VersionedTransaction = bincode::deserialize(&bytes).unwrap();
+        match &tx.message {
+            // 5 base ixs (non-WSOL pc in fixture) + tip = 6.
+            VersionedMessage::V0(m) => assert_eq!(m.instructions.len(), 6),
             _ => panic!("expected v0 message"),
         }
     }

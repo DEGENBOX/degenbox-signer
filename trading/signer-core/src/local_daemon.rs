@@ -844,6 +844,12 @@ async fn swap(
     let sol_mint = "So11111111111111111111111111111111111111112";
     let slippage_bps = req.slippage_bps.unwrap_or(route.slippage_bps);
     let tip_lamports = req.tip_lamports.unwrap_or(1_000_000);
+    // This handler submits via `falcon_jito` (see below), so native
+    // routes must carry the Falcon tip transfer in-tx or Falcon rejects
+    // them. Derived from the same submit-mode string for consistency;
+    // fail-closed to None on an unrecognised mode.
+    let tip_provider = crate::dex::tip::TipProvider::from_submit_mode("falcon_jito");
+    let tip_lamports_u64 = tip_lamports.max(0) as u64;
 
     // M17: enforce the caller's previewed min-out floor BEFORE building
     // or signing anything. If the tx we'd build enforces a weaker floor
@@ -940,6 +946,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 120_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                         skip_token_ata_create: s.ata_cache.is_known(&user, &mint_pk),
                     };
                     pumpfun::build_buy_tx(&params)
@@ -958,6 +967,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 100_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                     };
                     pumpfun::build_sell_tx(&params)
                         .map_err(|e| AppError::bad_request(format!("build_sell_tx: {e}")))?
@@ -1025,6 +1037,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 200_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                         skip_base_ata_create: s.ata_cache.is_known(&user, &pool.base_mint),
                         skip_quote_ata_create: s.ata_cache.is_known(&user, &pool.quote_mint),
                     };
@@ -1046,6 +1061,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 150_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                         skip_quote_ata_create: s.ata_cache.is_known(&user, &pool.quote_mint),
                     };
                     pumpfun_amm::build_sell_tx(&params)
@@ -1106,6 +1124,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 220_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                         skip_coin_ata_create: s.ata_cache.is_known(&user, &amm.coin_mint),
                         skip_pc_ata_create: s.ata_cache.is_known(&user, &amm.pc_mint),
                     };
@@ -1125,6 +1146,9 @@ async fn swap(
                         recent_blockhash: blockhash,
                         compute_unit_limit: 180_000,
                         compute_unit_price_micro_lamports: 50_000,
+                        tip_provider,
+                        tip_lamports: tip_lamports_u64,
+                        tip_selector: crate::dex::tip::TipSelector::from_blockhash(&blockhash),
                         skip_pc_ata_create: s.ata_cache.is_known(&user, &amm.pc_mint),
                     };
                     raydium_amm_v4::build_sell_tx(&params).map_err(|e| {

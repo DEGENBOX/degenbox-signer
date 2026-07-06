@@ -48,6 +48,7 @@ use crate::{
         pumpfun::{self, BuildTxError, BuyTxParams, SellTxParams},
         pumpfun_amm::{self, BuyTxParams as AmmBuyTxParams, SellTxParams as AmmSellTxParams},
         raydium_amm_v4,
+        tip::{TipProvider, TipSelector},
     },
     fee_strategy::{DexId, FeeParams, FeeStrategy, FeeTier, Side as TradeSide},
     jupiter::{JupiterClient, SwapOptions},
@@ -232,6 +233,22 @@ pub struct BotConfig {
 }
 
 impl BotConfig {
+    /// Which submit-provider tip (if any) this session's `submit_mode`
+    /// implies. FAIL-CLOSED: an unknown mode maps to
+    /// [`TipProvider::None`] (plain RPC, no tip) so a misconfigured
+    /// mode never blocks trading — it just forgoes the tip. Copy trades
+    /// share `self.cfg`, so they inherit the same provider automatically.
+    fn tip_provider(&self) -> TipProvider {
+        TipProvider::from_submit_mode(&self.submit_mode)
+    }
+
+    /// The tip amount in lamports, clamped to `u64` (a negative
+    /// `tip_lamports` — which the UI shouldn't produce — is treated as
+    /// zero). Falcon separately raises sub-minimum values at build time.
+    fn tip_lamports_u64(&self) -> u64 {
+        self.tip_lamports.max(0) as u64
+    }
+
     /// Build the PumpFun buy-tx params from a session config + signal +
     /// live curve state + recent blockhash. Caller fetches blockhash,
     /// BondingCurveAccount and the mint's owner program; this fn does
@@ -257,6 +274,9 @@ impl BotConfig {
             recent_blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.tip_provider(),
+            tip_lamports: self.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&recent_blockhash),
             // Safe default: include the create-IX. Caller (`BotEngine`)
             // overrides to `true` after an AtaCache hit.
             skip_token_ata_create: false,
@@ -289,6 +309,9 @@ impl BotConfig {
             recent_blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.tip_provider(),
+            tip_lamports: self.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&recent_blockhash),
         }
     }
 }
@@ -1192,6 +1215,9 @@ impl BotEngine {
             recent_blockhash: blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.cfg.tip_provider(),
+            tip_lamports: self.cfg.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&blockhash),
             skip_base_ata_create: self.ata_known(&user, &pool.base_mint),
             // Ignored for WSOL quotes — the builder wraps + closes.
             skip_quote_ata_create: false,
@@ -1297,6 +1323,9 @@ impl BotEngine {
             recent_blockhash: blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.cfg.tip_provider(),
+            tip_lamports: self.cfg.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&blockhash),
             skip_coin_ata_create: self.ata_known(&user, &coin_mint),
             // Ignored for WSOL quotes — the builder wraps + closes.
             skip_pc_ata_create: false,
@@ -1393,6 +1422,9 @@ impl BotEngine {
             recent_blockhash: blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.cfg.tip_provider(),
+            tip_lamports: self.cfg.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&blockhash),
             // Ignored for WSOL proceeds — the builder creates + closes.
             skip_pc_ata_create: false,
         };
@@ -1486,6 +1518,9 @@ impl BotEngine {
             recent_blockhash: blockhash,
             compute_unit_limit: fee.cu_limit,
             compute_unit_price_micro_lamports: fee.cu_price_micro_lamports,
+            tip_provider: self.cfg.tip_provider(),
+            tip_lamports: self.cfg.tip_lamports_u64(),
+            tip_selector: TipSelector::from_blockhash(&blockhash),
             // Ignored for WSOL proceeds — the builder creates + closes.
             skip_quote_ata_create: false,
         };
@@ -1891,7 +1926,10 @@ mod tests {
             bincode::deserialize(&bytes).unwrap();
         match &tx.message {
             solana_sdk::message::VersionedMessage::V0(msg) => {
-                assert_eq!(msg.instructions.len(), 4);
+                // cu-limit + cu-price + ATA + buy + Falcon tip = 5.
+                // submit_mode="falcon" with tip_lamports=0 → the tip is
+                // raised to the Falcon minimum and injected.
+                assert_eq!(msg.instructions.len(), 5);
             }
             _ => panic!("expected v0"),
         }
@@ -1950,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn pumpfun_sell_params_produces_buildable_tx_with_3_ixs() {
+    fn pumpfun_sell_params_produces_buildable_tx_with_tip() {
         let cfg = BotConfig {
             per_trade_lamports: 0,
             slippage_bps: 100,
@@ -1996,9 +2034,10 @@ mod tests {
             bincode::deserialize(&bytes).unwrap();
         match &tx.message {
             solana_sdk::message::VersionedMessage::V0(msg) => {
-                // Sell tx: cu-limit + cu-price + sell. No ATA-create
-                // because the seller already owns the ATA.
-                assert_eq!(msg.instructions.len(), 3);
+                // Sell tx: cu-limit + cu-price + sell + Falcon tip = 4.
+                // No ATA-create (seller owns the ATA); submit_mode=
+                // "falcon" injects the tip (raised to minimum).
+                assert_eq!(msg.instructions.len(), 4);
             }
             _ => panic!("expected v0"),
         }

@@ -17,6 +17,7 @@
 //! Defaults point at the 2026-06-11 audit fixtures; pump tokens
 //! graduate/die quickly, so pass fresh mints when re-running later.
 
+use degenbox_signer_core::dex::tip::{TipProvider, TipSelector};
 use degenbox_signer_core::dex::{ata, pumpfun, pumpfun_amm};
 use degenbox_signer_core::route::{self, SwapRoute};
 use degenbox_signer_core::rpc::RpcClient;
@@ -77,6 +78,9 @@ fn live_sim_pumpfun_classic_buy() {
             recent_blockhash: blockhash,
             compute_unit_limit: 150_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_token_ata_create: false,
         };
         let unsigned = pumpfun::build_buy_tx(&params).expect("build");
@@ -134,6 +138,9 @@ fn live_sim_pumpfun_classic_sell() {
             recent_blockhash: blockhash,
             compute_unit_limit: 150_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
         };
         let unsigned = pumpfun::build_sell_tx(&params).expect("build");
         let sim = Simulator::new(rpc_url);
@@ -193,6 +200,9 @@ fn live_sim_pumpswap_sell() {
             recent_blockhash: blockhash,
             compute_unit_limit: 250_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_quote_ata_create: false,
         };
         let unsigned = pumpfun_amm::build_sell_tx(&params).expect("build");
@@ -263,6 +273,9 @@ fn live_sim_pumpswap_buy() {
             recent_blockhash: blockhash,
             compute_unit_limit: 250_000,
             compute_unit_price_micro_lamports: 50_000,
+            tip_provider: TipProvider::None,
+            tip_lamports: 0,
+            tip_selector: TipSelector::new(0),
             skip_base_ata_create: false,
             skip_quote_ata_create: false,
         };

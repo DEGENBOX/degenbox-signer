@@ -79,7 +79,18 @@ export interface SolActivityRow {
   reason: string | null;
   signature: string | null;
   submit_mode: string | null;
+  /** Submit path of the latest order attempt. `"stub"` = paper mode —
+   *  the tx was intentionally never broadcast; render a "paper" label
+   *  and never link the (synthetic) signature to an explorer. */
+  path?: string | null;
   created_at: string;
+}
+
+/** True when this row's order went through the non-broadcasting stub
+ *  (paper mode). Mirrors `isPaperRow` in the web Solana feed — such
+ *  rows must not masquerade as real trades. */
+export function solIsPaperRow(row: SolActivityRow): boolean {
+  return row.path === "stub";
 }
 
 export interface LifecycleStage {

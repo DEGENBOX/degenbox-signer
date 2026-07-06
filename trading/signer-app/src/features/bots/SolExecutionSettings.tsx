@@ -12,8 +12,12 @@ import { useEffect, useState } from "react";
 import { ipc } from "../../ipc";
 import { Segmented } from "../../components/ui";
 
-type SubmitMode = "falcon_jito" | "quic" | "tpu";
-const SUBMIT_MODES: SubmitMode[] = ["falcon_jito", "quic", "tpu"];
+// Wire-valid modes ONLY (gateway `SubmitMode` enum: falcon | falcon_jito
+// | max_race). The old "quic"/"tpu" options serialized values the
+// gateway rejects with 422 — every order died invisibly (live incident
+// 2026-07-06, operator had "tpu" set).
+type SubmitMode = "falcon_jito" | "falcon" | "max_race";
+const SUBMIT_MODES: SubmitMode[] = ["falcon_jito", "falcon", "max_race"];
 
 export function SolExecutionSettings() {
   const [rpcUrl, setRpcUrl] = useState("");
@@ -135,9 +139,9 @@ export function SolExecutionSettings() {
           value={mode}
           onChange={setMode}
           options={[
-            { value: "falcon_jito", label: "Falcon + Jito" },
-            { value: "quic", label: "QUIC" },
-            { value: "tpu", label: "TPU" },
+            { value: "falcon_jito", label: "Falcon + Jito (default)" },
+            { value: "falcon", label: "Falcon only" },
+            { value: "max_race", label: "Max race" },
           ]}
         />
       </div>

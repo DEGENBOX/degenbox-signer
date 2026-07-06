@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "degenbox-signer-app"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "async-trait",
