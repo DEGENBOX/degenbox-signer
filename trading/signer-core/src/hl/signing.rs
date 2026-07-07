@@ -13,7 +13,8 @@ use crate::hl::info::{InfoClient, InfoError, LivePosition};
 use platform_hl_exchange::{
     actions::{
         CancelAction, CancelByCloidAction, CancelByCloidSpec, CancelSpec, Grouping, LimitSpec,
-        OrderAction, OrderType, OrderWire, TriggerWire, UpdateLeverageAction, VaultTransferAction,
+        OrderAction, OrderType, OrderWire, TriggerWire, UpdateLeverageAction,
+        UsdClassTransferAction, VaultTransferAction,
     },
     AgentSigner, ExchangeClient, ExchangeError, OrderStatusEntry,
 };
@@ -155,6 +156,18 @@ struct VaultTransferPayload {
     usd: u64,
 }
 
+/// Payload for `kind: "usdClassTransfer"` — a spot↔perp USDC move.
+/// `usd` is 6-decimal units; the signer formats it to the human decimal
+/// string HL's `usdClassTransfer` action wants. `to_perp = true` moves
+/// spot→perp.
+#[derive(Debug, Clone, Deserialize)]
+struct UsdClassTransferPayload {
+    cloid: String,
+    to_perp: bool,
+    /// USD in 6-decimal units. $100 → `100_000_000`.
+    usd: u64,
+}
+
 /// Payload for `kind: "closePosition"`. The signer looks up the live
 /// position on HL, computes `abs(szi) * percent / 100`, and submits a
 /// reduce-only market order in the OPPOSITE direction.
@@ -234,6 +247,7 @@ pub async fn execute(
         "cancelByOid" => execute_cancel_by_oid(payload, &ctx.signer, &ctx.hl).await,
         "updateLeverage" => execute_update_leverage(payload, &ctx.signer, &ctx.hl).await,
         "vaultTransfer" => execute_vault_transfer(payload, &ctx.signer, &ctx.hl).await,
+        "usdClassTransfer" => execute_usd_class_transfer(payload, &ctx.signer, &ctx.hl).await,
         "closePosition" => execute_close_position(payload, ctx).await,
         "placeTpsl" => execute_place_tpsl(payload, ctx).await,
         "trailingSl" => execute_trailing_sl(payload),
@@ -556,6 +570,61 @@ async fn execute_vault_transfer(
     }
 }
 
+async fn execute_usd_class_transfer(
+    payload: &serde_json::Value,
+    signer: &AgentSigner,
+    client: &ExchangeClient,
+) -> Result<SignedSubmitResult, SignError> {
+    let p: UsdClassTransferPayload =
+        serde_json::from_value(payload.clone()).map_err(|e| SignError::Decode(e.to_string()))?;
+    // Fail-closed on a malformed / zero amount: never sign a $0 (or
+    // overflow) transfer. The gateway already clamps to the source
+    // balance; this is the signer-side belt-and-braces.
+    if p.usd == 0 {
+        return Err(SignError::BadPayload(
+            "usdClassTransfer amount is 0 — refusing to sign".into(),
+        ));
+    }
+    let amount = format_usd_6dp(p.usd);
+    let nonce = client.next_nonce();
+    let action =
+        UsdClassTransferAction::new(client.network().is_mainnet(), amount, p.to_perp, nonce);
+    match client.usd_class_transfer(&action, signer).await {
+        Ok(_) => Ok(SignedSubmitResult {
+            cloid: p.cloid,
+            oid: None,
+            status: "submitted".into(),
+            filled_size_usd: None,
+            err_msg: None,
+            closed_pnl: None,
+        }),
+        Err(e) => Ok(SignedSubmitResult {
+            cloid: p.cloid,
+            oid: None,
+            status: "failed".into(),
+            filled_size_usd: None,
+            err_msg: Some(format!("{e}")),
+            closed_pnl: None,
+        }),
+    }
+}
+
+/// Format a 6-decimal-place USD integer as the human decimal string HL
+/// expects on the `usdClassTransfer` wire (`12_500_000` → `"12.5"`).
+/// Trailing zeros trimmed; whole numbers render without a fractional part
+/// (`100_000_000` → `"100"`).
+fn format_usd_6dp(usd_6dp: u64) -> String {
+    let whole = usd_6dp / 1_000_000;
+    let frac = usd_6dp % 1_000_000;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    // 6-digit zero-padded fraction, trailing zeros stripped.
+    let frac_str = format!("{frac:06}");
+    let trimmed = frac_str.trim_end_matches('0');
+    format!("{whole}.{trimmed}")
+}
+
 // ─────────────────────── closePosition handler ───────────────────────
 
 async fn execute_close_position(
@@ -591,7 +660,22 @@ async fn execute_close_position(
     // One perp-meta lookup gives us the asset's precision, used for BOTH the
     // size rounding (B3) and the guard price (B2).
     let sz_decimals = asset_sz_decimals(ctx, &p.asset).await;
-    let close_size = compute_close_size(live.szi, percent);
+    let raw_close_size = compute_close_size(live.szi, percent);
+    // Live mark — needed for BOTH the guard price (B2) AND the $10-minimum
+    // notional resolve below. One lookup serves both.
+    let mark = ctx.info.mid_price(&p.asset).await.ok().flatten();
+    // MIN-NOTIONAL RESOLVE (money-safety: exits must NEVER be silently
+    // dropped). HL rejects any order below $10 notional (`Order must have
+    // minimum value of $10`). A 50% close of a ~$20 position sits right on
+    // that boundary and rounding / a small adverse move puts it UNDER →
+    // reject → the user can't exit from the dashboard. `resolve_close_size`
+    // (pure, unit-tested) bumps a sub-$10 requested close UP so it clears
+    // the floor, and — when bumping would strand a sub-$10 un-closeable
+    // remainder — closes the FULL position instead. When we can't price the
+    // position (no mark) it falls through with the requested size unchanged:
+    // fail-OPEN, never block a legitimate close on a missing quote.
+    let full_size = live.szi.abs();
+    let close_size = resolve_close_size(raw_close_size, full_size, mark);
     // B3: HL rejects sizes carrying more decimals than sz_decimals. Truncate
     // DOWN to the allowed precision — never closes MORE than the open position.
     let close_size = match sz_decimals {
@@ -603,7 +687,6 @@ async fn execute_close_position(
     // B2: a VALID guard price from the live mark ±5% (fill-guaranteeing side),
     // rounded to HL's price rules. Fall back to the old sentinel ONLY if we
     // truly can't get a mark price — better to attempt the exit than never.
-    let mark = ctx.info.mid_price(&p.asset).await.ok().flatten();
     let guard_px = match (mark, sz_decimals) {
         (Some(mid), Some(dp)) => guard_price(mid, exit_is_buy, dp),
         (Some(mid), None) => guard_price(mid, exit_is_buy, 2),
@@ -619,6 +702,57 @@ async fn execute_close_position(
         &guard_px,
     )
     .await
+}
+
+/// HL's absolute minimum order notional. HL rejects any order (open OR
+/// reduce/close) whose USD value is below this with `Order must have
+/// minimum value of $10`.
+const HL_MIN_ORDER_USD: Decimal = Decimal::from_parts(10, 0, 0, false, 0);
+
+/// Resolve the COIN size to actually close so a percent-close can never be
+/// silently rejected by HL's $10-minimum-notional rule (money-safety: an
+/// EXIT must always go through). Pure so the decision is unit-testable.
+///
+/// - `requested` = `abs(szi) * percent/100` (the size the user asked to close).
+/// - `full` = `abs(szi)` (the whole position).
+/// - `mark` = live mid price; `None` when we couldn't quote the coin.
+///
+/// Decision (when `mark` is known and > 0):
+///   * requested notional ≥ $10 → close `requested` as-is.
+///   * requested < $10 but the FULL position is also < $10 → the whole
+///     position is dust; close it ALL (bumping to $10 would overshoot).
+///   * requested < $10 and FULL ≥ $10 → bump the close UP to the $10 floor,
+///     BUT if that would leave a sub-$10 un-closeable remainder
+///     (`full_notional - 10 < 10`), close the FULL position instead — never
+///     strand dust the user then can't exit.
+///
+/// When `mark` is `None`/≤0 we can't compute notional, so return `requested`
+/// unchanged: fail-OPEN (attempt the exit) rather than block it on a missing
+/// quote. HL may still reject a genuinely-sub-$10 order in that rare case,
+/// but we never make the close WORSE than before.
+fn resolve_close_size(requested: Decimal, full: Decimal, mark: Option<Decimal>) -> Decimal {
+    let Some(px) = mark.filter(|m| *m > Decimal::ZERO) else {
+        return requested;
+    };
+    let requested_usd = requested * px;
+    if requested_usd >= HL_MIN_ORDER_USD {
+        return requested;
+    }
+    let full_usd = full * px;
+    // Whole position is itself below the floor → close it all (a partial
+    // can never satisfy the minimum here, and $10 would overshoot the
+    // position). Reduce-only caps the fill at the live size regardless.
+    if full_usd < HL_MIN_ORDER_USD {
+        return full;
+    }
+    // Bumping the close up to exactly $10 would leave `full - 10` behind.
+    // If that remainder is itself below $10 it's un-closeable dust — close
+    // the FULL position instead so the user can actually get flat.
+    if full_usd - HL_MIN_ORDER_USD < HL_MIN_ORDER_USD {
+        return full;
+    }
+    // Bump the close size up to the $10 floor (size = $10 / mark).
+    HL_MIN_ORDER_USD / px
 }
 
 fn parse_percent(raw: &str) -> Result<Decimal, SignError> {
@@ -993,6 +1127,58 @@ mod tests {
         assert_eq!(fill_usd("1", ""), None);
     }
 
+    /// $10-minimum-notional resolve (money-safety: an EXIT must never be
+    /// silently dropped). Covers each branch of `resolve_close_size`.
+    #[test]
+    fn resolve_close_size_never_strands_the_exit() {
+        // Position: 0.001 BTC @ $60k = $60 full notional.
+        let px = dec!(60000);
+        let full = dec!(0.001); // $60
+                                // 50% close = 0.0005 = $30 ≥ $10 → unchanged.
+        assert_eq!(
+            resolve_close_size(dec!(0.0005), full, Some(px)),
+            dec!(0.0005)
+        );
+
+        // ~$20 position, 50% close ≈ $10 boundary. full = 0.00033 BTC = $19.8.
+        let full = dec!(0.00033); // ~$19.8
+                                  // 50% requested = 0.000165 = ~$9.9 < $10. full $19.8 ≥ $10, and
+                                  // remainder after a $10 close = $9.8 < $10 → close the FULL position
+                                  // (never leave sub-$10 dust the user can't exit).
+        let out = resolve_close_size(dec!(0.000165), full, Some(px));
+        assert_eq!(out, full, "sub-$10 remainder → close full, not dust");
+
+        // Bigger position where a $10 bump leaves a healthy remainder:
+        // 0.01 BTC = $600. 1% requested = 0.0001 = $6 < $10 → bump to $10
+        // worth (= 10/60000), remainder $590 ≥ $10 so a partial is fine.
+        let full = dec!(0.01);
+        let out = resolve_close_size(dec!(0.0001), full, Some(px));
+        assert_eq!(
+            out,
+            HL_MIN_ORDER_USD / px,
+            "bump sub-$10 request to the floor"
+        );
+        assert!(out * px >= HL_MIN_ORDER_USD);
+        assert!(out < full, "a bumped partial must stay below the full size");
+
+        // Whole position is dust: 0.0001 BTC = $6 total. Any % close is
+        // sub-$10 AND full is sub-$10 → close it all.
+        let full = dec!(0.0001); // $6
+        assert_eq!(resolve_close_size(dec!(0.00005), full, Some(px)), full);
+
+        // No mark → fail-open: return the requested size unchanged (never
+        // block the exit on a missing quote).
+        assert_eq!(
+            resolve_close_size(dec!(0.000165), dec!(0.00033), None),
+            dec!(0.000165)
+        );
+        // Zero/negative mark is treated as "unpriced".
+        assert_eq!(
+            resolve_close_size(dec!(0.000165), dec!(0.00033), Some(dec!(0))),
+            dec!(0.000165)
+        );
+    }
+
     #[test]
     fn guard_price_is_valid_biased_and_precise() {
         // BTC ~60k: buy guard ~5% above, sell ~5% below, both ≤5 sig figs.
@@ -1255,6 +1441,55 @@ mod tests {
         let v = json!({"cloid": "x"}); // no asset_id, size, etc.
         let err: Result<OrderPayload, _> = serde_json::from_value(v);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn usd_class_transfer_payload_decodes_from_server_shape() {
+        let v = json!({
+            "version": 1,
+            "kind": "usdClassTransfer",
+            "cloid": "ct:p:abc",
+            "to_perp": true,
+            "usd": 12_500_000_u64,
+        });
+        let p: UsdClassTransferPayload = serde_json::from_value(v).unwrap();
+        assert!(p.to_perp);
+        assert_eq!(p.usd, 12_500_000);
+        assert_eq!(p.cloid, "ct:p:abc");
+    }
+
+    /// 6dp → human decimal string, matching HL's `usdClassTransfer` amount
+    /// wire format: whole numbers have no fraction, trailing zeros trimmed.
+    #[test]
+    fn format_usd_6dp_matches_hl_amount_string() {
+        assert_eq!(format_usd_6dp(100_000_000), "100");
+        assert_eq!(format_usd_6dp(12_500_000), "12.5");
+        assert_eq!(format_usd_6dp(1_000_000), "1");
+        assert_eq!(format_usd_6dp(1_234_567), "1.234567");
+        assert_eq!(format_usd_6dp(1), "0.000001");
+        assert_eq!(format_usd_6dp(50_000), "0.05");
+    }
+
+    /// A zero-amount usdClassTransfer is refused BEFORE any HL POST —
+    /// fail-closed on a malformed amount (mirrors the gateway's clamp).
+    #[tokio::test]
+    async fn usd_class_transfer_zero_amount_fails_closed() {
+        let signer =
+            AgentSigner::from_hex(&"11".repeat(32), platform_hl_exchange::Network::Testnet)
+                .unwrap();
+        let hl = ExchangeClient::new(platform_hl_exchange::Network::Testnet).unwrap();
+        let payload = json!({
+            "version": 1,
+            "kind": "usdClassTransfer",
+            "cloid": "ct:p:zero",
+            "to_perp": true,
+            "usd": 0_u64,
+        });
+        let r = execute_usd_class_transfer(&payload, &signer, &hl).await;
+        assert!(
+            matches!(r, Err(SignError::BadPayload(_))),
+            "zero amount must fail-closed, got {r:?}"
+        );
     }
 
     // ─── closePosition payload tests ───
@@ -1743,6 +1978,7 @@ mod contract_tests {
             "instruction_cancel_by_oid.json",
             "instruction_update_leverage.json",
             "instruction_vault_transfer.json",
+            "instruction_usd_class_transfer.json",
             "instruction_place_tpsl.json",
         ] {
             let v = load(f);
@@ -1862,6 +2098,18 @@ mod contract_tests {
             p.vault_address,
             "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303"
         );
+    }
+
+    #[test]
+    fn fixture_usd_class_transfer_decodes() {
+        let p: UsdClassTransferPayload =
+            serde_json::from_value(load("instruction_usd_class_transfer.json"))
+                .expect("usdClassTransfer envelope decode");
+        assert!(p.to_perp, "spot→perp direction must survive decode");
+        assert_eq!(p.usd, 12_500_000);
+        assert_eq!(p.cloid, "ct:p:0x0190f3a1b2c3d4e5f60718293a4b5c74");
+        // And it formats to the human amount HL wants on the wire.
+        assert_eq!(format_usd_6dp(p.usd), "12.5");
     }
 
     #[test]
@@ -1987,6 +2235,7 @@ mod contract_tests {
             "instruction_cancel_by_oid.json",
             "instruction_update_leverage.json",
             "instruction_vault_transfer.json",
+            "instruction_usd_class_transfer.json",
             "instruction_place_tpsl.json",
             "result_submitted.json",
             "result_filled.json",

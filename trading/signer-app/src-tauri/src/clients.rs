@@ -625,6 +625,9 @@ async fn hl_standby_loop(
                         *g = crate::hl::runtime::BalanceSnapshot {
                             account_value_usd: summary.account_value_usd,
                             withdrawable_usd: summary.withdrawable_usd,
+                            spot_usdc: summary.spot_usdc,
+                            is_unified: summary.is_unified,
+                            unified_value_usd: summary.unified_value_usd,
                             positions,
                             fetched_at: Some(chrono::Utc::now()),
                             error: None,

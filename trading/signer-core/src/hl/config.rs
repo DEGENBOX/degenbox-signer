@@ -57,8 +57,14 @@ pub struct HlConfig {
     /// CLI can read/write it typed; the JSON wire shape is unchanged.
     #[serde(default)]
     pub client_name: Option<String>,
-    /// Per-bot poll cadence (seconds) for the server-poll fallback loop.
-    /// Defaults to 3 to match the CLI when absent.
+    /// Per-bot poll cadence (seconds) for the server-poll FALLBACK loop.
+    /// The primary pickup path is the gateway-WS push nudge
+    /// (`hl::push::spawn_intent_nudge_subscriber`): a queued instruction
+    /// wakes the poll loop in ~ms, so this interval only bounds worst-case
+    /// latency when a nudge is missed (WS reconnecting / dropped frame).
+    /// Lowered 3→1 (2026-07-07 latency pass): the nudge makes the common
+    /// case sub-100ms, and a 1s fallback caps the miss case at 1s instead
+    /// of 3s for one extra poll/3s of idle DB hits — negligible load.
     #[serde(default = "default_poll_secs")]
     pub poll_secs: u64,
     /// Optional NATS URL for sub-second push nudges. Usually unset in the
@@ -76,7 +82,7 @@ pub struct HlConfig {
 }
 
 fn default_poll_secs() -> u64 {
-    3
+    1
 }
 
 impl Default for HlConfig {

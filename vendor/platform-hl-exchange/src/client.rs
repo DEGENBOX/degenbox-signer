@@ -6,9 +6,9 @@
 
 use crate::actions::{
     ApproveAgentAction, CancelAction, CancelByCloidAction, OrderAction, UpdateLeverageAction,
-    VaultTransferAction,
+    UsdClassTransferAction, VaultTransferAction, HL_USER_SIGN_CHAIN_ID,
 };
-use crate::signer::{AgentSigner, Network, SignerError};
+use crate::signer::{AgentSigner, Eip712Field, Eip712Value, Network, SignerError};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -196,6 +196,62 @@ impl ExchangeClient {
         // NOT retryable: a vault transfer has no dedup key, so re-POSTing
         // after a lost response could move funds twice.
         let _ = self.post_action(action, signer, None, false).await?;
+        Ok(())
+    }
+
+    /// Move USDC between the SPOT and PERP wallets of the account
+    /// (`toPerp = true` → spot→perp). User-signed action: the agent key
+    /// signs the EIP-712 `HyperliquidTransaction:UsdClassTransfer`
+    /// message, and the envelope nonce MUST equal the action's own
+    /// `nonce` (HL binds them). Returns `Ok(())` if HL accepted; the
+    /// balance move settles async — the FE polls spot/perp state.
+    ///
+    /// NOT retryable: a re-POST after a lost response could move funds
+    /// twice (no cloid dedup on class transfers).
+    pub async fn usd_class_transfer(
+        &self,
+        action: &UsdClassTransferAction,
+        signer: &AgentSigner,
+    ) -> Result<(), ExchangeError> {
+        // The signed EIP-712 struct is EXACTLY these four fields, in this
+        // order (HL `USD_CLASS_TRANSFER_SIGN_TYPES`). `signatureChainId`
+        // rides the wire action but is NOT part of the signed message.
+        let fields = [
+            Eip712Field {
+                name: "hyperliquidChain",
+                ty: "string",
+                value: Eip712Value::Str(&action.hyperliquid_chain),
+            },
+            Eip712Field {
+                name: "amount",
+                ty: "string",
+                value: Eip712Value::Str(&action.amount),
+            },
+            Eip712Field {
+                name: "toPerp",
+                ty: "bool",
+                value: Eip712Value::Bool(action.to_perp),
+            },
+            Eip712Field {
+                name: "nonce",
+                ty: "uint64",
+                value: Eip712Value::Uint(action.nonce),
+            },
+        ];
+        let sig = signer.sign_user_action(
+            "HyperliquidTransaction:UsdClassTransfer",
+            &fields,
+            HL_USER_SIGN_CHAIN_ID,
+        )?;
+        let req = ExchangeRequest {
+            action,
+            // HL requires the envelope nonce == the action nonce for
+            // user-signed class transfers.
+            nonce: action.nonce,
+            signature: &sig,
+            vault_address: None,
+        };
+        let _ = self.post_raw(&req).await?;
         Ok(())
     }
 

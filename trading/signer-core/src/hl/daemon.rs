@@ -255,11 +255,19 @@ pub async fn run_scoped(opts: DaemonOpts, hooks: DaemonHooks, scope: ClaimScope)
     // Background balance refresher off the MASTER account (the agent reads
     // $0). Runs every 5s into the shared runtime. Skipped + surfaced when
     // no master is paired.
+    //
+    // A depth-1 nudge channel lets the poll loop request an IMMEDIATE
+    // balance refresh the moment it signs an instruction — otherwise the
+    // app's Positions/Account views (fed by this snapshot) keep showing the
+    // pre-fill balance/size until the next 5 s tick after a trade the user
+    // just placed. Depth 1 coalesces a burst into one extra fetch; a full
+    // channel drops the nudge (the ticker still catches up ≤ 5 s later).
+    let (bal_nudge_tx, bal_nudge_rx) = tokio::sync::mpsc::channel::<()>(1);
     if let Some(master) = opts.config.account_address.clone() {
         let rt = opts.runtime.clone();
         let net = network;
         tokio::spawn(async move {
-            balance_refresh_loop(net, master, rt, my_generation).await;
+            balance_refresh_loop(net, master, rt, my_generation, bal_nudge_rx).await;
         });
     } else if let Ok(mut g) = opts.runtime.balance.lock() {
         // Not fatal — only closePosition / placeTpsl require the master,
@@ -498,6 +506,15 @@ pub async fn run_scoped(opts: DaemonOpts, hooks: DaemonHooks, scope: ClaimScope)
                         *g = total.saturating_sub(idx + 1);
                     }
                 }
+                // A signed instruction changed the account (open/close/DCA) —
+                // ask the balance loop to refresh NOW so the app's Positions/
+                // Account views reflect the new state within a round-trip
+                // instead of on the next 5 s tick. `try_send` is non-blocking:
+                // a full (depth-1) channel already has a refresh queued, and
+                // the ticker is the safety net regardless.
+                if handled_cursor.is_some() {
+                    let _ = bal_nudge_tx.try_send(());
+                }
                 last_seen = commit_cursor(last_seen, handled_cursor, failed_at);
                 opts.events.batch_settled();
             }
@@ -550,6 +567,7 @@ async fn balance_refresh_loop(
     master: String,
     runtime: SharedHlRuntime,
     my_generation: u64,
+    mut nudge_rx: tokio::sync::mpsc::Receiver<()>,
 ) {
     let info = match HttpInfoClient::new(network) {
         Ok(c) => c,
@@ -562,7 +580,14 @@ async fn balance_refresh_loop(
     };
     let mut ticker = interval(Duration::from_secs(5));
     loop {
-        ticker.tick().await;
+        // Fetch on the 5 s ticker OR the moment the poll loop nudges us
+        // after signing an instruction — so a fresh balance/position
+        // snapshot lands within ~one HL round-trip of a fill instead of
+        // waiting out the interval.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = nudge_rx.recv() => {}
+        }
         if !runtime.daemon_running.load(Ordering::Relaxed)
             || runtime.run_generation.load(Ordering::SeqCst) != my_generation
         {
@@ -589,6 +614,9 @@ async fn balance_refresh_loop(
                     *g = BalanceSnapshot {
                         account_value_usd: summary.account_value_usd,
                         withdrawable_usd: summary.withdrawable_usd,
+                        spot_usdc: summary.spot_usdc,
+                        is_unified: summary.is_unified,
+                        unified_value_usd: summary.unified_value_usd,
                         positions,
                         fetched_at: Some(Utc::now()),
                         error: None,

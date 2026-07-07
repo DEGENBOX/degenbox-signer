@@ -7,8 +7,9 @@
 // Switch is the device-wide signing kill-switch (there is no HL-only
 // pause command — documented gap).
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
+  ArrowRightLeft,
   FlaskConical,
   KeyRound,
   Link2,
@@ -27,6 +28,7 @@ import {
   type MenuEntry,
 } from "../../components/ui";
 import { PAIRING_PILL, connMeta, pairingHealthy } from "./meta";
+import { SpotPerpTransferDialog } from "./SpotPerpTransferDialog";
 import type { HlPairingStatus, HlStatus, StatusReport } from "./ipc";
 
 export interface ExecutorCardProps {
@@ -60,7 +62,27 @@ export function ExecutorCard({
 }: ExecutorCardProps) {
   const conn = connMeta(hl);
   const acct = Number(hl.balance.account_value_usd);
-  const acctValue = Number.isFinite(acct) && hl.balance.account_value_usd != null ? acct : null;
+  const perpValue = Number.isFinite(acct) && hl.balance.account_value_usd != null ? acct : null;
+  // SPOT USDC is a SEPARATE HL wallet from perp on a SEPARATED account.
+  // `null` = fetch failed (render "—").
+  const spot = Number(hl.balance.spot_usdc);
+  const spotUsdc = Number.isFinite(spot) && hl.balance.spot_usdc != null ? spot : null;
+  // UNIFIED account: HL trades ONE balance (spot backs perp automatically)
+  // and greys out the spot↔perp transfer. Show a SINGLE truthful value and
+  // hide the transfer entirely; perp accountValue alone reads $0 with the
+  // money in spot. SEPARATED account: keep the co-equal perp + spot split
+  // + the transfer (spot is a distinct wallet needing a move to trade).
+  const isUnified = hl.balance.is_unified ?? false;
+  const uni = Number(hl.balance.unified_value_usd);
+  const unifiedValue =
+    Number.isFinite(uni) && hl.balance.unified_value_usd != null ? uni : null;
+  // The single balance figure the card leads with.
+  const acctValue = isUnified ? unifiedValue : perpValue;
+  const hasIdleSpot = spotUsdc != null && spotUsdc > 0.01;
+  // "Money's in spot, move it to perp" only makes sense on a SEPARATED
+  // account — a unified account trades off the spot USDC directly.
+  const perpEmptySpotFunded = !isUnified && perpValue === 0 && hasIdleSpot;
+  const [transferOpen, setTransferOpen] = useState(false);
 
   const menu: (MenuEntry | "sep")[] = [
     {
@@ -183,13 +205,27 @@ export function ExecutorCard({
           borderTop: "1px solid rgb(var(--line) / 0.1)",
         }}
       >
-        <CardStat label="Account value">
+        <CardStat label={isUnified ? "Balance" : "Perp equity"}>
           {acctValue != null ? (
             <Ticker value={acctValue} format={(n) => fmtUsdOrDash(n)} />
           ) : (
             <Dash hint="Balance not fetched yet" />
           )}
         </CardStat>
+        {/* Separated account only: spot is a distinct wallet. On a unified
+            account the spot USDC is already inside "Balance", so a separate
+            "Spot USDC" stat would double-count + mislead. */}
+        {!isUnified && (
+          <CardStat label="Spot USDC">
+            {spotUsdc != null ? (
+              <span style={{ color: hasIdleSpot ? "var(--amber)" : undefined }}>
+                {fmtUsdOrDash(spotUsdc)}
+              </span>
+            ) : (
+              <Dash hint="Spot balance not fetched yet" />
+            )}
+          </CardStat>
+        )}
         <CardStat label="Withdrawable">{fmtUsdOrDash(hl.balance.withdrawable_usd)}</CardStat>
         <CardStat label="Queue">
           <span title="Orders the gateway has queued for this device to sign">
@@ -207,6 +243,49 @@ export function ExecutorCard({
           </span>
         </CardStat>
       </div>
+
+      {/* SEPARATED accounts only: perp+spot are distinct wallets, so surface
+          a one-click transfer to fund perp from spot without leaving for
+          hyperliquid.xyz. A UNIFIED account has no transfer (HL greys it out;
+          spot backs perp automatically) — never render the button there. */}
+      {!isUnified &&
+        (hasIdleSpot || (perpValue != null && perpValue > 0 && spotUsdc != null)) && (
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() => setTransferOpen(true)}
+            disabled={busy}
+          >
+            <ArrowRightLeft size={13} style={{ marginRight: 4 }} />
+            Transfer spot ↔ perp
+          </button>
+          {perpEmptySpotFunded && (
+            <span style={{ fontSize: 11, color: "var(--amber)" }}>
+              Your {fmtUsdOrDash(spotUsdc)} is in spot — move it to perp to trade.
+            </span>
+          )}
+        </div>
+      )}
+
+      {transferOpen && !isUnified && (
+        <SpotPerpTransferDialog
+          spotUsdc={spotUsdc}
+          perpUsd={perpValue}
+          paper={hl.paper_mode}
+          initialToPerp={perpValue === 0}
+          onClose={() => setTransferOpen(false)}
+          onDone={() => setTransferOpen(false)}
+        />
+      )}
 
       {hl.error && (
         <div className="error-box" style={{ marginTop: 12 }}>

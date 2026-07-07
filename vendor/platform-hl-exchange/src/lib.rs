@@ -36,7 +36,7 @@ pub mod userfills;
 pub use actions::{
     ApproveAgentAction, CancelAction, CancelByCloidAction, CancelByCloidSpec, CancelSpec, Grouping,
     LimitSpec, OrderAction, OrderType, OrderWire, TriggerWire, UpdateLeverageAction,
-    VaultTransferAction,
+    UsdClassTransferAction, VaultTransferAction, HL_USER_SIGN_CHAIN_ID, HL_USER_SIGN_CHAIN_ID_HEX,
 };
 pub use client::{
     ApprovalResult, CancelResult, ExchangeClient, ExchangeError, ExchangeResponse, OrderResult,

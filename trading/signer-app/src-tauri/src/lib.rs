@@ -127,6 +127,7 @@ pub fn run() {
             commands::hl_status,
             commands::hl_set_paper_mode,
             commands::hl_pairing_status,
+            commands::hl_transfer_spot_perp,
             commands::hl_unpair,
             commands::submit_hl_totp,
             commands::pick_backend,

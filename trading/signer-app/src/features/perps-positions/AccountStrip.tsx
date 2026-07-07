@@ -86,8 +86,21 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
   const totalsWindows = windows?.totals.realized_usd ?? null;
 
   const paired = hl?.paired ?? false;
-  const balUsd = num(hl?.balance.account_value_usd ?? null);
   const withdrawable = num(hl?.balance.withdrawable_usd ?? null);
+  // UNIFIED account: HL trades ONE balance (spot backs perp automatically),
+  // greys out the spot↔perp transfer, and reports perp accountValue as $0
+  // with the money in spot. Show a SINGLE truthful account value and never
+  // the separated perp/spot split. SEPARATED account: keep the co-equal
+  // perp + spot read (spot is a distinct wallet needing a transfer).
+  const isUnified = hl?.balance.is_unified ?? false;
+  const perpUsd = num(hl?.balance.account_value_usd ?? null);
+  const spotUsd = num(hl?.balance.spot_usdc ?? null);
+  const unifiedUsd = num(hl?.balance.unified_value_usd ?? null);
+  // The single "equity" figure the strip leads with:
+  //   unified   → the combined value HL shows the user (perp + spot)
+  //   separated → the perp equity (spot rendered separately)
+  const balUsd = isUnified ? unifiedUsd : perpUsd;
+  const hasIdleSpot = spotUsd != null && spotUsd > 0.01;
 
   const dot = !hl
     ? "grey"
@@ -141,15 +154,36 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
             </div>
             <div className="mt-1.5 flex items-baseline gap-3 font-mono tabular-nums text-[11px]">
               <span
-                title={`Account value (equity)${
+                title={`${
+                  isUnified
+                    ? "Account value (unified — spot backs perp automatically)"
+                    : "Account value (perp equity)"
+                }${
                   hl?.balance.fetched_at ? ` · updated ${timeAgo(hl.balance.fetched_at)}` : ""
                 }`}
               >
-                <span className="text-ink-4">equity </span>
-                <span className="text-ink-1">
+                <span className="text-ink-4">{isUnified ? "balance " : "equity "}</span>
+                <span
+                  className={
+                    !isUnified && balUsd === 0 && hasIdleSpot
+                      ? "text-amber-300"
+                      : "text-ink-1"
+                  }
+                >
                   {balUsd != null ? fmtUsd(String(balUsd)) : "—"}
                 </span>
               </span>
+              {/* Separated account only: spot is a distinct wallet. For a
+                  unified account the spot USDC is already IN `balance`, so a
+                  second "spot" cell would double-count + mislead. */}
+              {!isUnified && (
+                <span title="Spot USDC (separate wallet from perp)">
+                  <span className="text-ink-4">spot </span>
+                  <span className={hasIdleSpot ? "text-amber-300" : "text-ink-2"}>
+                    {spotUsd != null ? fmtUsd(String(spotUsd)) : "—"}
+                  </span>
+                </span>
+              )}
               <span title="Withdrawable USDC">
                 <span className="text-ink-4">free </span>
                 <span className="text-ink-2">

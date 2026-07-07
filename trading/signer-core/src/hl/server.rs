@@ -136,6 +136,19 @@ pub struct VerifyTotpResp {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ClassTransferReq {
+    pub to_perp: bool,
+    /// Human decimal USD string ("12.5").
+    pub usd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassTransferResp {
+    pub cloid: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RedeemRegistrationReq {
     pub token: String,
     pub agent_address: String,
@@ -335,6 +348,38 @@ impl ServerClient {
             challenge_id: raw.challenge_id,
             expires_at: raw.expires_at,
         })
+    }
+
+    /// Enqueue a spot↔perp USDC transfer via the gateway
+    /// (`POST /exchange/transfer/spot-perp`). Same money-path as any order:
+    /// the gateway persists an `hl_pending_instructions` row that THIS
+    /// daemon then claims + signs (`usdClassTransfer`) + POSTs to HL. The
+    /// gateway rejects (fail-closed) if the amount exceeds the source
+    /// balance. `usd` is the human decimal string ("12.5"); `to_perp=true`
+    /// moves spot→perp. Returns the enqueued `cloid`.
+    pub async fn class_transfer(
+        &self,
+        to_perp: bool,
+        usd: &str,
+    ) -> Result<ClassTransferResp, ServerError> {
+        let url = format!("{}/api/hyperliquid/exchange/transfer/spot-perp", self.base);
+        let body = ClassTransferReq {
+            to_perp,
+            usd: usd.to_string(),
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ServerError::Status(status, truncate_body(&text)));
+        }
+        serde_json::from_str(&text).map_err(|e| ServerError::Status(status, format!("decode: {e}")))
     }
 
     pub async fn verify_totp(&self, challenge_id: &str, code: &str) -> Result<String, ServerError> {

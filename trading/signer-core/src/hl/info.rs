@@ -32,8 +32,28 @@ pub enum InfoError {
 /// callers MUST pass the master.
 #[derive(Debug, Clone, Default)]
 pub struct AccountSummary {
+    /// Raw perp equity from `clearinghouseState.marginSummary.accountValue`.
+    /// For a UNIFIED account this is often "$0" (funds sit in spot) — the
+    /// signer app must display `unified_value_usd` instead when
+    /// `is_unified`, NOT this bare perp value.
     pub account_value_usd: Option<String>,
     pub withdrawable_usd: Option<String>,
+    /// SPOT USDC total from `spotClearinghouseState` — a SEPARATE HL wallet
+    /// from perp on a SEPARATED account. Surfaced so the signer app shows
+    /// Perp + Spot co-equally and never a lone alarming "$0" when funds are
+    /// parked in spot. `None` when the spot fetch failed (render "—", never
+    /// a misleading $0).
+    pub spot_usdc: Option<String>,
+    /// True when `userAbstraction == "unifiedAccount"`. HL trades a unified
+    /// account from ONE balance (spot backs perp automatically) and greys
+    /// out the spot↔perp transfer. When true the app shows ONE balance
+    /// (`unified_value_usd`) and hides the transfer dialog. Fail-closed to
+    /// `false` (separated) on any probe error.
+    pub is_unified: bool,
+    /// The single account value HL shows a UNIFIED account = perp equity +
+    /// spot USDC. `None` for a separated account (use the perp/spot split
+    /// instead) or when the perp leg is unknown.
+    pub unified_value_usd: Option<String>,
     pub positions: Vec<LivePosition>,
 }
 
@@ -191,11 +211,63 @@ impl HttpInfoClient {
                 entry_px: wrap.position.entry_px.clone(),
             });
         }
+        // Spot USDC is a SEPARATE HL wallet (on a separated account) — fetch
+        // it best-effort so a spot fetch failure can't blank the perp
+        // summary. `None` = fetch failed (render "—"), `Some("0")` =
+        // genuinely no spot USDC.
+        let spot_usdc = self.spot_usdc(account).await.unwrap_or(None);
+        // Fail-closed to separated on any probe error: a failed abstraction
+        // check must never wrongly hide a real spot↔perp transfer.
+        let is_unified = self.is_unified_account(account).await.unwrap_or(false);
+        let account_value_usd = state.margin_summary.and_then(|m| m.account_value);
+        // Unified: HL trades ONE balance = perp equity + spot USDC. Compute
+        // it here so every app surface reads the same truthful number.
+        let unified_value_usd = if is_unified {
+            sum_usd(account_value_usd.as_deref(), spot_usdc.as_deref())
+        } else {
+            None
+        };
         Ok(AccountSummary {
-            account_value_usd: state.margin_summary.and_then(|m| m.account_value),
+            account_value_usd,
             withdrawable_usd: state.withdrawable,
+            spot_usdc,
+            is_unified,
+            unified_value_usd,
             positions,
         })
+    }
+
+    /// `info { type: "userAbstraction", user }` → `true` iff HL returns the
+    /// literal `"unifiedAccount"`. HL returns a bare JSON string. Any other
+    /// mode (`"default"`, `"portfolioMargin"`, …) is non-unified. `account`
+    /// MUST be the MASTER wallet.
+    pub async fn is_unified_account(&self, account: &str) -> Result<bool, InfoError> {
+        let bytes = self
+            .post(&serde_json::json!({"type": "userAbstraction", "user": account}))
+            .await?;
+        let mode: String = serde_json::from_slice(&bytes)
+            .map_err(|e| InfoError::Decode(format!("userAbstraction: {e}")))?;
+        Ok(mode == "unifiedAccount")
+    }
+
+    /// SPOT USDC total from `spotClearinghouseState`. `Ok(Some(t))` when
+    /// the USDC row is present; `Ok(Some("0"))` when the blob loaded but
+    /// has no USDC row (genuinely $0); `Ok(None)` never returned here (a
+    /// missing balances array is treated as $0). `Err` on transport.
+    /// `account` MUST be the MASTER wallet.
+    pub async fn spot_usdc(&self, account: &str) -> Result<Option<String>, InfoError> {
+        let bytes = self
+            .post(&serde_json::json!({"type": "spotClearinghouseState", "user": account}))
+            .await?;
+        let state: SpotClearinghouseState = serde_json::from_slice(&bytes)
+            .map_err(|e| InfoError::Decode(format!("spotClearinghouseState: {e}")))?;
+        for b in &state.balances {
+            if b.coin.eq_ignore_ascii_case("USDC") {
+                return Ok(Some(b.total.clone()));
+            }
+        }
+        // Blob loaded, no USDC row → genuinely $0.
+        Ok(Some("0".to_string()))
     }
 }
 
@@ -252,6 +324,19 @@ struct ClearinghouseState {
 struct MarginSummary {
     #[serde(rename = "accountValue", default)]
     account_value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SpotClearinghouseState {
+    #[serde(default)]
+    balances: Vec<SpotBalanceRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SpotBalanceRaw {
+    coin: String,
+    #[serde(default)]
+    total: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +432,17 @@ fn find_position(state: &ClearinghouseState, coin: &str) -> Result<LivePosition,
     Err(InfoError::NoPosition(coin_upper))
 }
 
+/// Sum two HL USD amount strings (perp equity + spot USDC) into the single
+/// unified account value. Returns `None` when the perp leg (`a`) is absent
+/// or unparseable — we never fabricate a value from spot alone. A missing /
+/// unparseable spot leg (`b`) is treated as $0 so the perp equity is still a
+/// truthful lower bound. Output is a plain decimal string (HL convention).
+fn sum_usd(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    let perp = a?.parse::<f64>().ok()?;
+    let spot = b.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    Some(format!("{}", perp + spot))
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
@@ -362,6 +458,21 @@ mod tests {
 
     fn state_from(json: serde_json::Value) -> ClearinghouseState {
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn sum_usd_unified_value_combines_perp_and_spot() {
+        // Operator's real case: perp $0, spot $81.275006 → $81.275006.
+        assert_eq!(
+            sum_usd(Some("0.0"), Some("81.275006")).as_deref(),
+            Some("81.275006")
+        );
+        // Perp position + idle spot both count.
+        assert_eq!(sum_usd(Some("50.0"), Some("31.0")).as_deref(), Some("81"));
+        // Missing/failed spot leg → perp equity is a truthful lower bound.
+        assert_eq!(sum_usd(Some("40.0"), None).as_deref(), Some("40"));
+        // Missing perp leg → None; never fabricate from spot alone.
+        assert_eq!(sum_usd(None, Some("81.0")), None);
     }
 
     #[test]

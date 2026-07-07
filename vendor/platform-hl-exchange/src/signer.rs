@@ -131,6 +131,129 @@ impl AgentSigner {
         let typed_hash = eip712_l1_typed_data_hash(&connection_id, self.network);
         ecdsa_sign(&self.signing_key, &typed_hash)
     }
+
+    /// Sign a **user-signed action** — the second HL signing scheme,
+    /// distinct from L1 actions. Used by `usdClassTransfer` (spot↔perp),
+    /// `usdSend`, `withdraw3`, `approveAgent`. Unlike L1 actions there is
+    /// NO msgpack / connection-id hop: the action's own fields are the
+    /// EIP-712 message, hashed under the `HyperliquidSignTransaction`
+    /// domain on the Arbitrum chain (chainId = the action's
+    /// `signatureChainId`, e.g. `0x66eee`).
+    ///
+    /// `fields` are the `(name, EIP712-type, value)` triples that make up
+    /// the message struct — MUST match HL's `*_SIGN_TYPES` array exactly
+    /// (name + order + type), or HL rejects with "Invalid signature".
+    /// `primary_type` is e.g. `"HyperliquidTransaction:UsdClassTransfer"`.
+    /// `chain_id` is the numeric domain chainId (`0x66eee` → `421614`).
+    ///
+    /// The agent key signs this: HL accepts a usdClassTransfer signed by
+    /// an approved agent wallet on behalf of the master account.
+    pub fn sign_user_action(
+        &self,
+        primary_type: &str,
+        fields: &[Eip712Field<'_>],
+        chain_id: u64,
+    ) -> Result<Signature, SignerError> {
+        let typed_hash = eip712_user_typed_data_hash(primary_type, fields, chain_id);
+        ecdsa_sign(&self.signing_key, &typed_hash)
+    }
+}
+
+/// One EIP-712 struct member for a user-signed action. `ty` is the
+/// EIP-712 type string (`"string"`, `"bool"`, `"uint64"`). Only the
+/// value kinds HL's user-signed actions use are supported.
+pub struct Eip712Field<'a> {
+    pub name: &'a str,
+    pub ty: &'a str,
+    pub value: Eip712Value<'a>,
+}
+
+/// The concrete value of an [`Eip712Field`].
+pub enum Eip712Value<'a> {
+    Str(&'a str),
+    Bool(bool),
+    Uint(u64),
+}
+
+/// EIP-712 hash for a user-signed action under the
+/// `HyperliquidSignTransaction` domain.
+///
+/// `hash = keccak256(0x19 || 0x01 || domain_separator || struct_hash)`.
+///
+/// - domain: `name="HyperliquidSignTransaction", version="1",
+///   chainId=<arbitrum>, verifyingContract=0x0…0`.
+/// - struct: `primary_type` + the `fields` (name/type/value), encoded
+///   per EIP-712 (`string`/`bytes` → keccak of the bytes; `bool`/uint →
+///   left-padded 32-byte big-endian word).
+///
+/// Pure so the encoding is unit-testable against the HL Python SDK
+/// reference without an HL round-trip.
+pub fn eip712_user_typed_data_hash(
+    primary_type: &str,
+    fields: &[Eip712Field<'_>],
+    chain_id: u64,
+) -> [u8; 32] {
+    // ── Domain separator ──
+    let domain_typehash = keccak256(
+        b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
+    let name_hash = keccak256(b"HyperliquidSignTransaction");
+    let version_hash = keccak256(b"1");
+    let mut chain_id_be = [0u8; 32];
+    chain_id_be[24..].copy_from_slice(&chain_id.to_be_bytes());
+    let verifying_contract = [0u8; 32]; // 20-byte zero address, left-padded
+
+    let mut domain_enc = Vec::with_capacity(32 * 5);
+    domain_enc.extend_from_slice(&domain_typehash);
+    domain_enc.extend_from_slice(&name_hash);
+    domain_enc.extend_from_slice(&version_hash);
+    domain_enc.extend_from_slice(&chain_id_be);
+    domain_enc.extend_from_slice(&verifying_contract);
+    let domain_sep = keccak256(&domain_enc);
+
+    // ── Struct hash ──
+    // typehash = keccak256("PrimaryType(name1 type1,name2 type2,...)")
+    let mut type_str = String::from(primary_type);
+    type_str.push('(');
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            type_str.push(',');
+        }
+        type_str.push_str(f.ty);
+        type_str.push(' ');
+        type_str.push_str(f.name);
+    }
+    type_str.push(')');
+    let struct_typehash = keccak256(type_str.as_bytes());
+
+    let mut struct_enc = Vec::with_capacity(32 * (fields.len() + 1));
+    struct_enc.extend_from_slice(&struct_typehash);
+    for f in fields {
+        match &f.value {
+            // Dynamic types (string, bytes) are encoded as keccak256 of
+            // their contents.
+            Eip712Value::Str(s) => struct_enc.extend_from_slice(&keccak256(s.as_bytes())),
+            // Atomic types → left-padded 32-byte big-endian word.
+            Eip712Value::Bool(b) => {
+                let mut w = [0u8; 32];
+                w[31] = u8::from(*b);
+                struct_enc.extend_from_slice(&w);
+            }
+            Eip712Value::Uint(u) => {
+                let mut w = [0u8; 32];
+                w[24..].copy_from_slice(&u.to_be_bytes());
+                struct_enc.extend_from_slice(&w);
+            }
+        }
+    }
+    let struct_hash = keccak256(&struct_enc);
+
+    let mut buf = Vec::with_capacity(2 + 32 + 32);
+    buf.push(0x19);
+    buf.push(0x01);
+    buf.extend_from_slice(&domain_sep);
+    buf.extend_from_slice(&struct_hash);
+    keccak256(&buf)
 }
 
 /// `keccak256(msgpack(action) ‖ nonce_be_u64 ‖ vault_flag [‖ vault_addr])`.
@@ -498,6 +621,169 @@ mod tests {
         let s1 = signer.sign_l1_action(&a, 1, "").unwrap();
         let s2 = signer.sign_l1_action(&a, 2, "").unwrap();
         assert!(s1.r != s2.r || s1.s != s2.s);
+    }
+
+    // ─── User-signed action (usdClassTransfer) EIP-712 ───
+
+    /// The user-signed typed-data hash for a `usdClassTransfer`, recomputed
+    /// entirely by hand and compared to `eip712_user_typed_data_hash`. This
+    /// pins the domain (HyperliquidSignTransaction / chainId 0x66eee) AND
+    /// the struct encoding (string → keccak, bool/uint → padded word) AND
+    /// the typehash string against any accidental edit — a divergence here
+    /// means HL rejects every transfer with "Invalid signature".
+    #[test]
+    fn user_typed_data_hash_matches_handcoded_keccak() {
+        // Message: hyperliquidChain="Mainnet", amount="12.5", toPerp=true,
+        // nonce=1700000000000.
+        let fields = [
+            Eip712Field {
+                name: "hyperliquidChain",
+                ty: "string",
+                value: Eip712Value::Str("Mainnet"),
+            },
+            Eip712Field {
+                name: "amount",
+                ty: "string",
+                value: Eip712Value::Str("12.5"),
+            },
+            Eip712Field {
+                name: "toPerp",
+                ty: "bool",
+                value: Eip712Value::Bool(true),
+            },
+            Eip712Field {
+                name: "nonce",
+                ty: "uint64",
+                value: Eip712Value::Uint(1_700_000_000_000),
+            },
+        ];
+        let chain_id = 0x6_6eeeu64;
+
+        // Domain separator by hand.
+        let dom_th = keccak256(
+            b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        );
+        let nh = keccak256(b"HyperliquidSignTransaction");
+        let vh = keccak256(b"1");
+        let mut chain = [0u8; 32];
+        chain[24..].copy_from_slice(&chain_id.to_be_bytes());
+        let vc = [0u8; 32];
+        let mut dbuf = Vec::new();
+        dbuf.extend_from_slice(&dom_th);
+        dbuf.extend_from_slice(&nh);
+        dbuf.extend_from_slice(&vh);
+        dbuf.extend_from_slice(&chain);
+        dbuf.extend_from_slice(&vc);
+        let dom_sep = keccak256(&dbuf);
+
+        // Struct hash by hand.
+        let struct_th = keccak256(
+            b"HyperliquidTransaction:UsdClassTransfer(string hyperliquidChain,string amount,bool toPerp,uint64 nonce)",
+        );
+        let mut sbuf = Vec::new();
+        sbuf.extend_from_slice(&struct_th);
+        sbuf.extend_from_slice(&keccak256(b"Mainnet"));
+        sbuf.extend_from_slice(&keccak256(b"12.5"));
+        let mut w_bool = [0u8; 32];
+        w_bool[31] = 1;
+        sbuf.extend_from_slice(&w_bool);
+        let mut w_nonce = [0u8; 32];
+        w_nonce[24..].copy_from_slice(&1_700_000_000_000u64.to_be_bytes());
+        sbuf.extend_from_slice(&w_nonce);
+        let struct_hash = keccak256(&sbuf);
+
+        let mut wrap = Vec::new();
+        wrap.push(0x19);
+        wrap.push(0x01);
+        wrap.extend_from_slice(&dom_sep);
+        wrap.extend_from_slice(&struct_hash);
+        let expected = keccak256(&wrap);
+
+        let actual = eip712_user_typed_data_hash(
+            "HyperliquidTransaction:UsdClassTransfer",
+            &fields,
+            chain_id,
+        );
+        assert_eq!(expected, actual);
+    }
+
+    /// A user-signed action produces a canonical low-S secp256k1
+    /// signature, deterministic across calls (RFC-6979), with `v ∈ {27,28}`.
+    #[test]
+    fn sign_user_action_emits_canonical_signature() {
+        let signer = AgentSigner::from_hex(FIXTURE_KEY, Network::Mainnet).unwrap();
+        let fields = [
+            Eip712Field {
+                name: "hyperliquidChain",
+                ty: "string",
+                value: Eip712Value::Str("Mainnet"),
+            },
+            Eip712Field {
+                name: "amount",
+                ty: "string",
+                value: Eip712Value::Str("1"),
+            },
+            Eip712Field {
+                name: "toPerp",
+                ty: "bool",
+                value: Eip712Value::Bool(true),
+            },
+            Eip712Field {
+                name: "nonce",
+                ty: "uint64",
+                value: Eip712Value::Uint(42),
+            },
+        ];
+        let sig = signer
+            .sign_user_action("HyperliquidTransaction:UsdClassTransfer", &fields, 0x6_6eee)
+            .unwrap();
+        assert!(sig.r.starts_with("0x") && sig.r.len() == 66);
+        assert!(sig.s.starts_with("0x") && sig.s.len() == 66);
+        assert!(sig.v == 27 || sig.v == 28);
+        let sig2 = signer
+            .sign_user_action("HyperliquidTransaction:UsdClassTransfer", &fields, 0x6_6eee)
+            .unwrap();
+        assert_eq!(sig.r, sig2.r);
+        assert_eq!(sig.s, sig2.s);
+        let s_bytes = hex::decode(sig.s.trim_start_matches("0x")).unwrap();
+        assert!(s_bytes[0] <= 0x7f, "signature must be low-S");
+    }
+
+    /// `toPerp` false vs true and different nonces change the hash — the
+    /// direction + nonce genuinely bind into the signature.
+    #[test]
+    fn user_typed_data_hash_binds_direction_and_nonce() {
+        let base = |to_perp: bool, nonce: u64| {
+            let fields = [
+                Eip712Field {
+                    name: "hyperliquidChain",
+                    ty: "string",
+                    value: Eip712Value::Str("Mainnet"),
+                },
+                Eip712Field {
+                    name: "amount",
+                    ty: "string",
+                    value: Eip712Value::Str("5"),
+                },
+                Eip712Field {
+                    name: "toPerp",
+                    ty: "bool",
+                    value: Eip712Value::Bool(to_perp),
+                },
+                Eip712Field {
+                    name: "nonce",
+                    ty: "uint64",
+                    value: Eip712Value::Uint(nonce),
+                },
+            ];
+            eip712_user_typed_data_hash(
+                "HyperliquidTransaction:UsdClassTransfer",
+                &fields,
+                0x6_6eee,
+            )
+        };
+        assert_ne!(base(true, 1), base(false, 1), "toPerp must change the hash");
+        assert_ne!(base(true, 1), base(true, 2), "nonce must change the hash");
     }
 
     #[test]

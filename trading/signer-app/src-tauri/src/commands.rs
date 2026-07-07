@@ -824,6 +824,18 @@ pub struct HlStatusReport {
 pub struct BalanceSnapshotDto {
     pub account_value_usd: Option<String>,
     pub withdrawable_usd: Option<String>,
+    /// SPOT USDC total (separate HL wallet from perp on a SEPARATED
+    /// account). `None` = spot fetch failed — the UI renders "—", never a
+    /// misleading $0.
+    pub spot_usdc: Option<String>,
+    /// True when HL trades this as a UNIFIED account (spot backs perp; the
+    /// transfer is greyed out by HL). UI shows ONE balance
+    /// (`unified_value_usd`) and hides the transfer dialog. Defaults false.
+    #[serde(default)]
+    pub is_unified: bool,
+    /// The single account value HL shows a UNIFIED account = perp + spot.
+    /// `None` for a separated account (use the perp/spot split).
+    pub unified_value_usd: Option<String>,
     pub positions: Vec<PositionDto>,
     pub fetched_at: Option<String>,
     pub error: Option<String>,
@@ -843,6 +855,9 @@ impl From<BalanceSnapshot> for BalanceSnapshotDto {
         Self {
             account_value_usd: b.account_value_usd,
             withdrawable_usd: b.withdrawable_usd,
+            spot_usdc: b.spot_usdc,
+            is_unified: b.is_unified,
+            unified_value_usd: b.unified_value_usd,
             positions: b
                 .positions
                 .into_iter()
@@ -1034,6 +1049,47 @@ pub async fn hl_pairing_status(
         Err(ServerError::Status(status, _)) if status.as_u16() == 404 => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Enqueue a spot↔perp USDC transfer through the gateway. Same money-path
+/// as any order: the gateway persists an instruction THIS daemon then
+/// claims + signs (`usdClassTransfer`) + POSTs to HL. The gateway rejects
+/// fail-closed if the amount exceeds the source balance. `usd` is the
+/// human decimal string ("12.5"); `to_perp=true` moves spot→perp. Operates
+/// on the given client's config (or PRIMARY when `client_id` is None).
+#[tauri::command]
+pub async fn hl_transfer_spot_perp(
+    to_perp: bool,
+    usd: String,
+    client_id: Option<String>,
+) -> Result<degenbox_signer_core::hl::server::ClassTransferResp, String> {
+    let cfg = match &client_id {
+        Some(id) => {
+            let vault = crate::clients::open_vault()?
+                .ok_or_else(|| "no vault on this device".to_string())?;
+            let entry = vault
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("unknown client {id}"))?;
+            if entry.chain != core::WalletChain::Hl {
+                return Err("client is not a Hyperliquid wallet".into());
+            }
+            let is_primary = vault
+                .primary(core::WalletChain::Hl)
+                .is_some_and(|p| p.id == entry.id);
+            crate::clients::hl_config_for(&vault, &entry, is_primary)
+        }
+        None => HlConfig::load_or_default(),
+    };
+    let token = cfg
+        .api_token
+        .clone()
+        .ok_or_else(|| "pair your Hyperliquid signer first".to_string())?;
+    let client = ServerClient::new(cfg.server_url.clone(), token).map_err(|e| e.to_string())?;
+    client
+        .class_transfer(to_perp, &usd)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Clear the HL pairing (token + master account) from disk. Stops the

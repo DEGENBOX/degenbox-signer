@@ -1177,6 +1177,11 @@ async fn hl_standby_loop(
                             *g = core::hl::runtime::BalanceSnapshot {
                                 account_value_usd: summary.account_value_usd,
                                 withdrawable_usd: summary.withdrawable_usd,
+                                // Spot/unified surfacing is a GUI-app concern; the
+                                // legacy CLI shows perp equity only.
+                                spot_usdc: None,
+                                is_unified: false,
+                                unified_value_usd: None,
                                 positions,
                                 fetched_at: Some(chrono::Utc::now()),
                                 error: None,

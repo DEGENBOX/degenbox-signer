@@ -172,9 +172,11 @@ mod tests {
     }
 
     /// A config written before `poll_secs` existed must still load,
-    /// defaulting the cadence to 3 rather than failing to deserialize.
+    /// defaulting the cadence rather than failing to deserialize. The
+    /// default was lowered 3→1 in the 2026-07-07 latency pass (push-nudge
+    /// is the primary pickup path; the poll is now a 1s fallback).
     #[test]
-    fn legacy_config_without_poll_secs_defaults_to_three() {
+    fn legacy_config_without_poll_secs_defaults_to_fallback_cadence() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("cfg.json");
         let legacy = serde_json::json!({
@@ -183,7 +185,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.poll_secs, 3);
+        assert_eq!(loaded.poll_secs, 1);
     }
 
     /// Old configs written before `account_address` existed must still

@@ -49,6 +49,12 @@ export const commands = {
     setPaperMode: (paper: boolean) => ipc.hlSetPaperMode(paper),
     closePosition: (coin: string, percent: number) =>
       ipc.hlClosePosition(coin, percent),
+    /** Move USDC between the account's SPOT and PERP wallets. `usd` is a
+     *  human decimal string ("12.5"); `toPerp=true` = spot→perp. Enqueued
+     *  via the gateway; the daemon signs + POSTs. Gateway rejects
+     *  fail-closed if the amount exceeds the source balance. */
+    transferSpotPerp: (toPerp: boolean, usd: string, clientId?: string) =>
+      ipc.hlTransferSpotPerp(toPerp, usd, clientId),
     placeTpsl: (
       coin: string,
       tpPrice: string | null,

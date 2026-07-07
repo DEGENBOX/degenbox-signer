@@ -61,7 +61,16 @@ pub struct TriggerWire {
     pub is_market: bool,
     #[serde(rename = "triggerPx")]
     pub trigger_px: String,
-    #[serde(rename = "tpSl")]
+    /// HL's wire key is lowercase `tpsl` (verified against the HL
+    /// `/exchange` order schema + the Python/nktkas SDKs — the trigger
+    /// object requires `{isMarket, triggerPx, tpsl}`). Serializing it as
+    /// camelCase `tpSl` made HL reject EVERY trigger order — TP/SL on a
+    /// position, caller SL/TP legs, trailing-SL replaces, ladder rungs,
+    /// and the entry+TP+SL bulk — with `http status 422: Failed to
+    /// deserialize the JSON body into the target type`. This `rename`
+    /// drives BOTH the JSON wire and the msgpack the signature hashes, so
+    /// the fix lands on both sides at once.
+    #[serde(rename = "tpsl")]
     pub tp_sl: String,
 }
 
@@ -192,6 +201,74 @@ impl VaultTransferAction {
     }
 }
 
+// ─────────────────────── USD Class Transfer (spot↔perp) ───────────────────────
+//
+// Moves USDC between the SPOT and PERP wallets of the SAME account.
+// Perps trade off the perp balance only, so funds deposited to spot must
+// be transferred to perp before they can margin a position (and vice-
+// versa to withdraw). Unlike vault transfers this is a **user-signed**
+// action (EIP-712 `HyperliquidTransaction:UsdClassTransfer`), NOT an L1
+// action — signed by the approved agent key under the
+// `HyperliquidSignTransaction` domain on Arbitrum (chainId 0x66eee).
+//
+// HL Python SDK reference (`hyperliquid/exchange.py::usd_class_transfer`):
+//
+//   action = {
+//     "type":   "usdClassTransfer",
+//     "amount": str(amount),   // human USDC, e.g. "12.5"
+//     "toPerp": true|false,    // true = spot→perp, false = perp→spot
+//     "nonce":  timestamp_ms,
+//   }
+//   # sign_user_signed_action adds these two to the WIRE action:
+//   action["signatureChainId"] = "0x66eee"
+//   action["hyperliquidChain"] = "Mainnet" | "Testnet"
+//
+// The signed EIP-712 message (USD_CLASS_TRANSFER_SIGN_TYPES) is exactly:
+//   [hyperliquidChain(string), amount(string), toPerp(bool), nonce(uint64)]
+// — signatureChainId is on the wire but NOT in the signed struct.
+//
+// `nonce` doubles as the request nonce in the `/exchange` envelope, so
+// the action carries it inline (unlike order/cancel where the envelope
+// nonce is separate).
+
+/// Arbitrum chain id HL pins for user-signed actions: `0x66eee` = 421614.
+pub const HL_USER_SIGN_CHAIN_ID_HEX: &str = "0x66eee";
+pub const HL_USER_SIGN_CHAIN_ID: u64 = 0x6_6eee;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsdClassTransferAction {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(rename = "hyperliquidChain")]
+    pub hyperliquid_chain: String,
+    #[serde(rename = "signatureChainId")]
+    pub signature_chain_id: String,
+    /// Human-readable USDC amount as a decimal string, e.g. `"12.5"`.
+    pub amount: String,
+    /// `true` = spot→perp, `false` = perp→spot.
+    #[serde(rename = "toPerp")]
+    pub to_perp: bool,
+    /// ms-since-epoch; also the `/exchange` envelope nonce.
+    pub nonce: u64,
+}
+
+impl UsdClassTransferAction {
+    pub fn new(network_mainnet: bool, amount: String, to_perp: bool, nonce: u64) -> Self {
+        Self {
+            kind: "usdClassTransfer".to_string(),
+            hyperliquid_chain: if network_mainnet {
+                "Mainnet".into()
+            } else {
+                "Testnet".into()
+            },
+            signature_chain_id: HL_USER_SIGN_CHAIN_ID_HEX.into(),
+            amount,
+            to_perp,
+            nonce,
+        }
+    }
+}
+
 // ─────────────────────────── Approve Agent ───────────────────────────
 //
 // "Approve API agent" lets a derived secp256k1 key (held by us, on
@@ -246,10 +323,13 @@ impl ApproveAgentAction {
 mod tests {
     use super::*;
 
-    /// `TriggerWire` serialises with HL's expected camelCase keys —
-    /// the bulk-order TP/SL path depends on this.
+    /// `TriggerWire` serialises with HL's exact wire keys: `isMarket` and
+    /// `triggerPx` are camelCase, but `tpsl` is LOWERCASE (HL's schema).
+    /// The whole trigger path (TP/SL on a position, caller SL/TP legs,
+    /// trailing-SL, ladder rungs, entry+TP+SL bulk) 422'd on the old
+    /// camelCase `tpSl` — pin the correct key so it can't regress.
     #[test]
-    fn trigger_wire_uses_camelcase_keys() {
+    fn trigger_wire_uses_hl_wire_keys() {
         let t = TriggerWire {
             is_market: true,
             trigger_px: "65000".into(),
@@ -258,7 +338,41 @@ mod tests {
         let s = serde_json::to_string(&t).unwrap();
         assert!(s.contains("\"isMarket\":true"), "{s}");
         assert!(s.contains("\"triggerPx\":\"65000\""), "{s}");
-        assert!(s.contains("\"tpSl\":\"tp\""), "{s}");
+        // HL requires lowercase `tpsl` — NOT camelCase `tpSl`.
+        assert!(s.contains("\"tpsl\":\"tp\""), "{s}");
+        assert!(!s.contains("tpSl"), "must not emit camelCase tpSl: {s}");
+    }
+
+    /// A full trigger `OrderWire` (as `submit`/`placeTpsl`/bulk build it)
+    /// serialises to HL's exact `t.trigger` shape — this is the payload
+    /// HL 422'd on before the `tpsl` key fix. Pins the end-to-end wire.
+    #[test]
+    fn trigger_order_wire_matches_hl_schema() {
+        let w = OrderWire {
+            a: 0,
+            b: false,
+            p: "60000".into(),
+            s: "0.01".into(),
+            r: true,
+            t: OrderType {
+                limit: None,
+                trigger: Some(TriggerWire {
+                    is_market: true,
+                    trigger_px: "60000".into(),
+                    tp_sl: "sl".into(),
+                }),
+            },
+            c: Some("0x0190f3a1b2c3d4e5f60718293a4b5c6d".into()),
+        };
+        let s = serde_json::to_string(&w).unwrap();
+        assert!(s.contains("\"trigger\":{"), "{s}");
+        assert!(s.contains("\"tpsl\":\"sl\""), "{s}");
+        // The reduce-only trigger must NOT carry a `limit` object (HL's
+        // `t` is a one-of; both present is a deserialize error).
+        assert!(
+            !s.contains("\"limit\""),
+            "trigger order must omit limit: {s}"
+        );
     }
 
     /// `Grouping::PositionTpsl` JSON-serialises to `"positionTpsl"` —
@@ -334,6 +448,42 @@ mod tests {
         assert_eq!(
             a.vault_address,
             "0x1111111111111111111111111111111111111111"
+        );
+    }
+
+    /// `UsdClassTransferAction` serialises to HL's exact wire shape:
+    /// type, hyperliquidChain, signatureChainId, amount, toPerp, nonce.
+    /// The signed EIP-712 message is only a SUBSET of these
+    /// (hyperliquidChain/amount/toPerp/nonce) but the WIRE action carries
+    /// signatureChainId too — HL requires both on the POST envelope.
+    #[test]
+    fn usd_class_transfer_wire_shape() {
+        let a = UsdClassTransferAction::new(true, "12.5".into(), true, 1_700_000_000_000);
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(s.contains("\"type\":\"usdClassTransfer\""), "{s}");
+        assert!(s.contains("\"hyperliquidChain\":\"Mainnet\""), "{s}");
+        assert!(s.contains("\"signatureChainId\":\"0x66eee\""), "{s}");
+        assert!(s.contains("\"amount\":\"12.5\""), "{s}");
+        assert!(s.contains("\"toPerp\":true"), "{s}");
+        assert!(s.contains("\"nonce\":1700000000000"), "{s}");
+    }
+
+    /// Testnet flips `hyperliquidChain` to "Testnet" but keeps the same
+    /// Arbitrum `signatureChainId` (0x66eee) — matches the HL SDK.
+    #[test]
+    fn usd_class_transfer_testnet_chain_label() {
+        let a = UsdClassTransferAction::new(false, "1".into(), false, 1);
+        assert_eq!(a.hyperliquid_chain, "Testnet");
+        assert_eq!(a.signature_chain_id, HL_USER_SIGN_CHAIN_ID_HEX);
+        assert!(!a.to_perp);
+    }
+
+    /// The pinned Arbitrum chain-id hex parses to the numeric domain id.
+    #[test]
+    fn user_sign_chain_id_hex_matches_numeric() {
+        assert_eq!(
+            u64::from_str_radix(HL_USER_SIGN_CHAIN_ID_HEX.trim_start_matches("0x"), 16).unwrap(),
+            HL_USER_SIGN_CHAIN_ID
         );
     }
 }

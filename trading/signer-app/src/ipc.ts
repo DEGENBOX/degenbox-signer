@@ -51,6 +51,17 @@ export interface HlPosition {
 export interface HlBalance {
   account_value_usd: string | null;
   withdrawable_usd: string | null;
+  /** SPOT USDC total (separate HL wallet from perp on a SEPARATED account).
+   *  `null` = spot fetch failed — render "—", never a misleading $0. */
+  spot_usdc: string | null;
+  /** True when HL trades this as a UNIFIED account (spot backs perp
+   *  automatically; HL greys out the spot↔perp transfer). When true the UI
+   *  shows ONE balance (`unified_value_usd`) and hides the transfer dialog.
+   *  Defaults false for older daemons → separated perp/spot split. */
+  is_unified?: boolean;
+  /** The single account value HL shows a UNIFIED account = perp + spot.
+   *  `null` for a separated account (use the perp/spot split instead). */
+  unified_value_usd?: string | null;
   positions: HlPosition[];
   fetched_at: string | null;
   error: string | null;
@@ -59,6 +70,11 @@ export interface HlBalance {
 export interface HlTotpPrompt {
   challenge_id: string;
   expires_at: string;
+}
+
+export interface HlClassTransferResult {
+  cloid: string;
+  status: string;
 }
 
 export interface HlStatus {
@@ -661,6 +677,17 @@ export const ipc = {
   hlPairingStatus: (clientId?: string) =>
     invoke<HlPairingStatus | null>("hl_pairing_status", { clientId: clientId ?? null }),
   hlSetPaperMode: (paper: boolean) => invoke<void>("hl_set_paper_mode", { paper }),
+  /** Enqueue a spot↔perp USDC transfer through the gateway (same money-path
+   *  as any order — this daemon then signs the `usdClassTransfer` + POSTs to
+   *  HL). `usd` is a human decimal string ("12.5"); `toPerp=true` moves
+   *  spot→perp. The gateway rejects fail-closed if the amount exceeds the
+   *  source balance. `clientId` selects a vault HL wallet (defaults primary). */
+  hlTransferSpotPerp: (toPerp: boolean, usd: string, clientId?: string) =>
+    invoke<HlClassTransferResult>("hl_transfer_spot_perp", {
+      toPerp,
+      usd,
+      clientId: clientId ?? null,
+    }),
   submitHlTotp: (code: string) => invoke<void>("submit_hl_totp", { code }),
   pickBackend: (backend: "file" | "keychain") =>
     invoke<void>("pick_backend", { backend }),

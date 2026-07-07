@@ -30,8 +30,23 @@ pub enum ConnState {
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct BalanceSnapshot {
+    /// Raw perp equity. For a UNIFIED account this is often "$0" (funds in
+    /// spot) — the app must show `unified_value_usd` when `is_unified`.
     pub account_value_usd: Option<String>,
     pub withdrawable_usd: Option<String>,
+    /// SPOT USDC total — a SEPARATE HL wallet from perp on a SEPARATED
+    /// account. Surfaced so the signer app shows Perp + Spot co-equally and
+    /// never a lone alarming "$0" when funds are parked in spot. `None` =
+    /// spot fetch failed.
+    pub spot_usdc: Option<String>,
+    /// True when HL trades this as a UNIFIED account (spot backs perp; the
+    /// spot↔perp transfer is greyed out by HL). App shows ONE balance
+    /// (`unified_value_usd`) and hides the transfer dialog. Defaults false.
+    #[serde(default)]
+    pub is_unified: bool,
+    /// The single account value HL shows a UNIFIED account = perp equity +
+    /// spot USDC. `None` for a separated account (use the perp/spot split).
+    pub unified_value_usd: Option<String>,
     pub positions: Vec<PositionRow>,
     pub fetched_at: Option<DateTime<Utc>>,
     pub error: Option<String>,
