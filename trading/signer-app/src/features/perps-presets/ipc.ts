@@ -233,6 +233,52 @@ export const unfollowHlConfig = (configId: string) =>
 export const deleteHlConfig = (configId: string) =>
   gwDelete<void>(`/api/hyperliquid/copy-trade/configs/${configId}`);
 
+// ─── Circuit breaker (hyperliquid exchange module) ─────────────────
+//
+// Per-user consecutive-loss auto-halt. A tripped scope blocks ALL
+// auto-exec server-side until manually reset. The web dashboard's
+// reset control was stripped (read-only), so this desktop bot is now
+// the ONLY surface that can clear a tripped breaker. Mirrors the Rust
+// `CircuitBreakerStatusView` / `CircuitBreakerScopeView` /
+// `CircuitBreakerResetResponse` in
+// `crates/modules/hyperliquid/src/exchange/api.rs`.
+
+/** One breaker scope row — today just the account-wide "global" scope. */
+export interface CircuitBreakerScope {
+  scope_key: string;
+  consecutive_losses: number;
+  threshold: number;
+  enabled: boolean;
+  /** True when this scope is currently halting auto-exec. */
+  tripped: boolean;
+  tripped_at: string | null;
+  reset_at: string | null;
+  trip_count: number;
+}
+
+export interface CircuitBreakerStatus {
+  /** Env default threshold, applied to scopes with no explicit row. */
+  default_threshold: number;
+  scopes: CircuitBreakerScope[];
+}
+
+export interface CircuitBreakerResetResponse {
+  scope_key: string;
+  /** True when a tripped/non-zero row was actually cleared. */
+  cleared: boolean;
+}
+
+export const circuitBreakerStatus = () =>
+  gwGet<CircuitBreakerStatus>("/api/hl/circuit-breaker/status");
+
+/** Clear a tripped breaker. `scope` defaults to the account-wide
+ * "global" scope server-side when omitted. */
+export const circuitBreakerReset = (scope?: string) =>
+  gwPost<CircuitBreakerResetResponse>(
+    "/api/hl/circuit-breaker/reset",
+    scope ? { scope } : {},
+  );
+
 // ─── Helpers ───────────────────────────────────────────────────────
 
 /** EVM-style address shape the perps venue uses. */

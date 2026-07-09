@@ -22,6 +22,7 @@ import {
   useLastSignAt,
 } from "../components/statusItems";
 import { Collapsible } from "../components/Collapsible";
+import { CircuitBreakerBanner } from "../components/CircuitBreakerBanner";
 import { PerpsPositions } from "./PerpsPositions";
 import { PerpsActivityFeed } from "../features/activity/ActivityFeed";
 
@@ -122,6 +123,8 @@ export function PerpsLive({ status, hl, onReload, onGoBots }: Props) {
         items={items}
         right={<PaperToggle paper={paper} canGoLive={canGoLive} onReload={onReload} />}
       />
+
+      <CircuitBreakerBanner />
 
       <PerpsPositions hl={hl} onReload={onReload} onGoOverview={onGoBots} embedded />
 
