@@ -96,7 +96,10 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
       setSizePct("100");
       setSizeCapUsd("");
       setLeverageOverride("");
-      setOverrides(EMPTY_OVERRIDES);
+      // A fresh follow leads with the percent-of-account tier model
+      // (sizing_mode = 1) — mirrors the backend column default. Tiers stay
+      // empty (placeholders) so the user types their own %s; no defaults.
+      setOverrides({ ...EMPTY_OVERRIDES, sizingMode: "1" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caller?.caller_id, existing?.id]);
@@ -238,23 +241,107 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
           />
         </FormGroup>
 
-        <FormGroup title="Size & leverage">
-          <NumField
-            label="Size"
-            unit="%"
-            value={sizePct}
-            onChange={setSizePct}
-            placeholder="100"
-            hint="share of the call's size. 100 trades exactly what the call says, 50 halves it, 200 doubles it"
-          />
-          <NumField
-            label="Size cap"
-            unit="$"
-            value={sizeCapUsd}
-            onChange={setSizeCapUsd}
-            placeholder="no cap"
-            hint="calls that would trade more than this are skipped entirely (not shrunk)"
-          />
+        <FormGroup title="Size">
+          <Field
+            label="How to size each trade"
+            hint={
+              pctSizing
+                ? "size every trade as a share of your own account — set a % per conviction tier below"
+                : "scale or replace the dollar size the call carries"
+            }
+          >
+            <Segmented
+              options={[
+                { value: "1", label: "% of account" },
+                { value: "0", label: "$ per call" },
+              ]}
+              value={overrides.sizingMode}
+              onChange={(v) => setOv("sizingMode", v)}
+            />
+          </Field>
+          {pctSizing ? (
+            <>
+              <Field
+                label="Size per conviction (% of account)"
+                hint="the bot picks the tier from the call's conviction; a normal-conviction call uses Medium"
+              >
+                <div className="tier-pct-row">
+                  <NumField
+                    label="Small"
+                    unit="%"
+                    value={overrides.sizeLowPercent}
+                    onChange={(t) => setOv("sizeLowPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 2"
+                  />
+                  <NumField
+                    label="Medium"
+                    unit="%"
+                    value={overrides.sizeNormalPercent}
+                    onChange={(t) => setOv("sizeNormalPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 5"
+                  />
+                  <NumField
+                    label="High"
+                    unit="%"
+                    value={overrides.sizeHighPercent}
+                    onChange={(t) => setOv("sizeHighPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 10"
+                  />
+                </div>
+              </Field>
+              <FieldError
+                msg={
+                  errFor("sizeLowPercent") ??
+                  errFor("sizeNormalPercent") ??
+                  errFor("sizeHighPercent") ??
+                  errFor("sizingPctEquity")
+                }
+              />
+              <Field label="Account metric" hint="which balance the % is taken from">
+                <Segmented
+                  options={SIZE_BASIS.map((o) => ({
+                    value: String(o.value),
+                    label: o.label,
+                  }))}
+                  value={overrides.sizeBasis}
+                  onChange={(v) => setOv("sizeBasis", v)}
+                />
+              </Field>
+            </>
+          ) : (
+            <>
+              <NumField
+                label="Size"
+                unit="%"
+                value={sizePct}
+                onChange={setSizePct}
+                placeholder="100"
+                hint="share of the call's size. 100 trades exactly what the call says, 50 halves it, 200 doubles it"
+              />
+              <NumField
+                label="Fixed $ per trade"
+                unit="$"
+                value={overrides.sizeUsdOverride}
+                onChange={(t) => setOv("sizeUsdOverride", t)}
+                placeholder="use the call's size"
+                hint="replaces the call's dollar size entirely. Leave empty to keep the call's"
+              />
+              <NumField
+                label="Size cap"
+                unit="$"
+                value={sizeCapUsd}
+                onChange={setSizeCapUsd}
+                placeholder="no cap"
+                hint="calls that would trade more than this are skipped entirely (not shrunk)"
+              />
+            </>
+          )}
+        </FormGroup>
+
+        <FormGroup title="Leverage">
           <NumField
             label="Leverage"
             unit="×"
@@ -377,84 +464,17 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
         {showAdvanced && (
           <>
             <FormGroup title="Base size">
-              <Field
-                label="Where the base size comes from"
-                hint={
-                  pctSizing
-                    ? "size every trade as a share of your own account instead of the call's dollar size"
-                    : "use the dollar size the call (or the caller default) carries"
-                }
-              >
-                <Segmented
-                  options={[
-                    { value: "0", label: "The call's $ size" },
-                    { value: "1", label: "% of my account" },
-                  ]}
-                  value={overrides.sizingMode}
-                  onChange={(v) => setOv("sizingMode", v)}
-                />
-              </Field>
-              {!pctSizing ? (
-                <NumField
-                  label="Fixed $ per trade"
-                  unit="$"
-                  value={overrides.sizeUsdOverride}
-                  onChange={(t) => setOv("sizeUsdOverride", t)}
-                  placeholder="use the call's size"
-                  hint="replaces the call's dollar size entirely. Leave empty to keep the call's"
-                />
-              ) : (
+              {pctSizing && (
                 <>
                   <NumField
-                    label="Share of account"
+                    label="Flat share fallback"
                     unit="%"
                     value={overrides.sizingPctEquity}
                     onChange={(t) => setOv("sizingPctEquity", t)}
-                    placeholder="e.g. 5"
-                    hint="each trade uses this share of the account metric below"
+                    placeholder="off"
+                    hint="used when a call carries no conviction tag to match a tier above. Leave empty to rely on the Medium tier"
                   />
                   <FieldError msg={errFor("sizingPctEquity")} />
-                  <Field label="Account metric">
-                    <Segmented
-                      options={SIZE_BASIS.map((o) => ({
-                        value: String(o.value),
-                        label: o.label,
-                      }))}
-                      value={overrides.sizeBasis}
-                      onChange={(v) => setOv("sizeBasis", v)}
-                    />
-                  </Field>
-                  <Field
-                    label="Per-conviction overrides (optional)"
-                    hint="when a call is tagged low, normal or high conviction, that tag's % replaces the flat share above"
-                  >
-                    <div className="tier-pct-row">
-                      <NumField
-                        label="Low"
-                        unit="%"
-                        value={overrides.sizeLowPercent}
-                        onChange={(t) => setOv("sizeLowPercent", t)}
-                        inputMode="numeric"
-                        placeholder="off"
-                      />
-                      <NumField
-                        label="Normal"
-                        unit="%"
-                        value={overrides.sizeNormalPercent}
-                        onChange={(t) => setOv("sizeNormalPercent", t)}
-                        inputMode="numeric"
-                        placeholder="off"
-                      />
-                      <NumField
-                        label="High"
-                        unit="%"
-                        value={overrides.sizeHighPercent}
-                        onChange={(t) => setOv("sizeHighPercent", t)}
-                        inputMode="numeric"
-                        placeholder="off"
-                      />
-                    </div>
-                  </Field>
                 </>
               )}
               <Field

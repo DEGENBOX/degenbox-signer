@@ -90,9 +90,14 @@ export interface HlStatus {
   queue_pending: number;
   last_poll_at: string | null;
   error: string | null;
+  /** Distinct auth-layer condition → actionable panel, not a raw 401. */
+  auth_alert: HlAuthAlert | null;
   balance: HlBalance;
   totp_prompt: HlTotpPrompt | null;
 }
+
+/** Actionable auth condition surfaced by the daemon's token-refresh path. */
+export type HlAuthAlert = "session_expired" | "subscription_inactive";
 
 export interface HlPairResult {
   user_id: string;

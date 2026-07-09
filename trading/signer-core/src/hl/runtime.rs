@@ -28,6 +28,21 @@ pub enum ConnState {
     Error,
 }
 
+/// A distinct auth-layer condition the daemon surfaces to the GUI so it
+/// can show an actionable panel instead of a raw `401` string. Set by the
+/// token-refresh path; cleared on the next healthy poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthAlert {
+    /// The signer JWT expired and could not be refreshed (the daemon was
+    /// offline past the 30-day TTL). Fix = re-run setup.
+    SessionExpired,
+    /// The gateway refused to refresh because the subscription lapsed past
+    /// its grace window. Fix = renew the subscription; signing resumes
+    /// automatically on the next refresh once access returns.
+    SubscriptionInactive,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct BalanceSnapshot {
     /// Raw perp equity. For a UNIFIED account this is often "$0" (funds in
@@ -82,6 +97,9 @@ pub struct HlRuntime {
     pub last_poll_at: Mutex<Option<DateTime<Utc>>>,
     pub queue_pending: Mutex<usize>,
     pub error: Mutex<Option<String>>,
+    /// Distinct auth-layer condition (expired token / lapsed subscription)
+    /// for an actionable GUI panel. None when auth is healthy.
+    pub auth_alert: Mutex<Option<AuthAlert>>,
     /// A pending TOTP challenge the GUI must answer (None when not blocked).
     pub totp_prompt: Mutex<Option<TotpPrompt>>,
     /// The code the GUI submitted, consumed by the daemon's TOTP wait.
@@ -109,6 +127,11 @@ impl HlRuntime {
     pub fn set_error(&self, msg: Option<String>) {
         if let Ok(mut g) = self.error.lock() {
             *g = msg;
+        }
+    }
+    pub fn set_auth_alert(&self, alert: Option<AuthAlert>) {
+        if let Ok(mut g) = self.auth_alert.lock() {
+            *g = alert;
         }
     }
 }

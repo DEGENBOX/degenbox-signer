@@ -11,7 +11,7 @@
 // then cancels the server row. 10 s polling, optimistic mutations —
 // the fleet poll is owned by SolBotsTab (shared with Running now).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus, Users } from "lucide-react";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { shortAddr } from "@degenbox/ui";
@@ -25,6 +25,8 @@ import {
 import { groupSessions } from "../features/bots/meta";
 import type { Fleet } from "../features/bots/useFleet";
 import { ClientCard } from "../features/bots/ClientCard";
+import { WalletAccordion } from "../features/bots/WalletAccordion";
+import { WALLET_JUMP_EVENT } from "../features/bots/RunningNow";
 import { SessionList } from "../features/bots/SessionList";
 import { CreateClientDialog } from "../features/bots/CreateClientDialog";
 import { ActivateDialog } from "../features/bots/ActivateDialog";
@@ -46,6 +48,10 @@ export function Bots({
 
   const [notice, setNotice] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
   const [sessionBusyId, setSessionBusyId] = useState<string | null>(null);
+  // Accordion: id of the single expanded wallet (null = all collapsed).
+  // undefined = untouched, so the first wallet opens by default once the
+  // fleet resolves; after that the operator's choice is respected.
+  const [expandedWallet, setExpandedWallet] = useState<string | null | undefined>(undefined);
 
   // Dialog state.
   const [createOpen, setCreateOpen] = useState(false);
@@ -60,6 +66,26 @@ export function Bots({
   const primaryAddress = status?.sol_pubkey ?? null;
   const armedIds = new Set(device?.armed_session_ids ?? []);
   const grouped = groupSessions(sessions, clients ?? []);
+
+  // Which wallet is expanded. Until the operator touches an accordion
+  // (`undefined`), default to the primary wallet, else the first — so the
+  // section isn't a wall of collapsed rows on first paint.
+  const defaultExpanded =
+    (clients ?? []).find((c) => c.primary)?.id ?? (clients ?? [])[0]?.id ?? null;
+  const effectiveExpanded = expandedWallet === undefined ? defaultExpanded : expandedWallet;
+
+  // Running-now "Manage" jumps expand the target wallet (its accordion
+  // body is collapsed by default) before scrolling to it.
+  useEffect(() => {
+    const onJump = (e: Event) => {
+      const address = (e as CustomEvent<string | null>).detail;
+      if (!address) return;
+      const hit = (clients ?? []).find((c) => c.address === address);
+      if (hit) setExpandedWallet(hit.id);
+    };
+    window.addEventListener(WALLET_JUMP_EVENT, onJump);
+    return () => window.removeEventListener(WALLET_JUMP_EVENT, onJump);
+  }, [clients]);
 
   // ── session actions (contract preserved from the old page) ──────
   const arm = async (s: BotPreset) => {
@@ -198,33 +224,49 @@ export function Bots({
           }
         />
       ) : (
-        (clients ?? []).map((c, i) => (
-          <ClientCard
-            key={c.id}
-            c={c}
-            index={i}
-            balance={balances[c.address] ?? null}
-            sessions={grouped.byWallet.get(c.address) ?? []}
-            sessionsLoading={sessions === null}
-            armedIds={armedIds}
-            unlocked={unlocked}
-            busy={busyId === c.id}
-            sessionBusy={sessionBusyId !== null}
-            onToggleActive={fleet.toggleActive}
-            onRename={fleet.rename}
-            onSetPrimary={fleet.setPrimary}
-            onActivate={(x) => setActivateFor(x)}
-            onExport={exportKeystore}
-            onRemove={(x) => {
-              setRemoveErr(null);
-              setRemoveFor(x);
-            }}
-            onBudget={(x) => setBudgetFor(x)}
-            onStartSession={(x) => setSessionFor(x)}
-            onArm={arm}
-            onStop={stop}
-          />
-        ))
+        (clients ?? []).map((c, i) => {
+          const walletSessions = grouped.byWallet.get(c.address) ?? [];
+          const open = effectiveExpanded === c.id;
+          return (
+            <WalletAccordion
+              key={c.id}
+              c={c}
+              index={i}
+              balance={balances[c.address] ?? null}
+              sessionCount={
+                sessions === null ? null : walletSessions.filter((s) => s.enabled).length
+              }
+              open={open}
+              onToggle={() => setExpandedWallet(open ? null : c.id)}
+            >
+              <ClientCard
+                c={c}
+                index={i}
+                anchorOnWrapper
+                balance={balances[c.address] ?? null}
+                sessions={walletSessions}
+                sessionsLoading={sessions === null}
+                armedIds={armedIds}
+                unlocked={unlocked}
+                busy={busyId === c.id}
+                sessionBusy={sessionBusyId !== null}
+                onToggleActive={fleet.toggleActive}
+                onRename={fleet.rename}
+                onSetPrimary={fleet.setPrimary}
+                onActivate={(x) => setActivateFor(x)}
+                onExport={exportKeystore}
+                onRemove={(x) => {
+                  setRemoveErr(null);
+                  setRemoveFor(x);
+                }}
+                onBudget={(x) => setBudgetFor(x)}
+                onStartSession={(x) => setSessionFor(x)}
+                onArm={arm}
+                onStop={stop}
+              />
+            </WalletAccordion>
+          );
+        })
       )}
 
       {clients === null && !err && (

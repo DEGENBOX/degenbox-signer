@@ -278,6 +278,20 @@ pub async fn run_scoped(opts: DaemonOpts, hooks: DaemonHooks, scope: ClaimScope)
         g.error = Some("account not paired — link your HL master wallet (0x…)".into());
     }
 
+    // Proactive JWT refresh: renew the signer token well before its 30-day
+    // TTL elapses so the daemon never hits the ExpiredSignature 401 loop
+    // that silently killed polling. Gated server-side on the live
+    // subscription (grace/exempt honoured), so a lapsed user stops cleanly
+    // with a `SubscriptionInactive` alert instead of running forever.
+    {
+        let server = server.clone();
+        let rt = opts.runtime.clone();
+        let gen = my_generation;
+        tokio::spawn(async move {
+            token_refresh_loop(server, rt, gen).await;
+        });
+    }
+
     let ctx = ExecContext {
         signer: Arc::new(signer),
         hl: hl_client,
@@ -377,6 +391,9 @@ pub async fn run_scoped(opts: DaemonOpts, hooks: DaemonHooks, scope: ClaimScope)
         {
             Ok(rows) => {
                 opts.runtime.set_error(None);
+                // Auth is demonstrably healthy — clear any stale expiry /
+                // subscription alert (e.g. after a renewal + refresh).
+                opts.runtime.set_auth_alert(None);
                 if let Ok(mut g) = opts.runtime.last_poll_at.lock() {
                     *g = Some(Utc::now());
                 }
@@ -519,11 +536,105 @@ pub async fn run_scoped(opts: DaemonOpts, hooks: DaemonHooks, scope: ClaimScope)
                 opts.events.batch_settled();
             }
             Err(e) => {
+                // An expired signer JWT surfaces here as a 401. Try one
+                // in-line refresh so a token that JUST crossed its TTL heals
+                // without waiting for the 6h loop; the refresh maps the
+                // outcome to a clear auth alert (session-expired vs
+                // subscription-inactive) instead of the raw 401 string.
+                if matches!(&e, ServerError::Status(s, _) if *s == StatusCode::UNAUTHORIZED) {
+                    if try_refresh_token(&server, &opts.runtime).await {
+                        // Fresh token in hand — next tick polls clean.
+                        opts.runtime.set_error(None);
+                        continue;
+                    }
+                    // Refresh set the specific auth_alert already; keep a
+                    // human-readable error line to match.
+                    opts.runtime.set_conn(ConnState::Error);
+                    opts.events.health_changed(false);
+                    continue;
+                }
                 warn!(?e, "poll failed — will retry next tick");
                 opts.runtime.set_error(Some(format!("poll failed: {e}")));
                 opts.runtime.set_conn(ConnState::Error);
                 opts.events.health_changed(false);
             }
+        }
+    }
+}
+
+/// How long before `exp` to proactively refresh the signer JWT. Generous
+/// so even a daemon that only wakes occasionally renews in time; the token
+/// is minted for 30 days, so a 7-day lead leaves a wide margin.
+const REFRESH_LEAD: Duration = Duration::from_secs(7 * 24 * 3600);
+/// Cadence of the proactive refresh check.
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+
+/// Background loop: renew the signer JWT before it expires. Exits when its
+/// spawn generation is superseded (daemon stop/respawn). The FIRST check
+/// runs shortly after boot so a daemon that starts already inside the
+/// refresh window heals promptly.
+async fn token_refresh_loop(server: ServerClient, runtime: SharedHlRuntime, generation: u64) {
+    // Small initial delay so registration + first poll settle first.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        if runtime.run_generation.load(Ordering::SeqCst) != generation
+            || !runtime.daemon_running.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        // Refresh when the token is missing its exp (unknown → refresh to be
+        // safe) or within the lead window of expiring.
+        let due = match server.token_seconds_remaining() {
+            Some(secs) => secs <= REFRESH_LEAD.as_secs() as i64,
+            None => true,
+        };
+        if due {
+            let _ = try_refresh_token(&server, &runtime).await;
+        }
+        tokio::time::sleep(REFRESH_CHECK_INTERVAL).await;
+    }
+}
+
+/// Attempt one token refresh. On success: persist the new token to the
+/// on-disk config FIRST (so a crash can't lose the only valid credential),
+/// then hot-swap it into the live `ServerClient` and clear any auth alert.
+/// On `402` → `SubscriptionInactive`; on `401` (our own token already dead,
+/// can't authenticate the refresh) → `SessionExpired`. Returns whether a
+/// fresh token is now active.
+async fn try_refresh_token(server: &ServerClient, runtime: &SharedHlRuntime) -> bool {
+    match server.refresh_token().await {
+        Ok(resp) => {
+            // Persist to disk before swapping in memory.
+            let mut cfg = crate::hl::config::HlConfig::load_or_default();
+            cfg.api_token = Some(resp.api_token.clone());
+            if let Err(e) = cfg.save() {
+                warn!(%e, "refreshed signer token but failed to persist — swapping in-memory only");
+            }
+            server.set_token(resp.api_token);
+            runtime.set_auth_alert(None);
+            info!("signer token refreshed");
+            true
+        }
+        Err(ServerError::Status(s, body)) if s == StatusCode::PAYMENT_REQUIRED => {
+            warn!(%body, "token refresh denied — subscription inactive");
+            runtime.set_auth_alert(Some(crate::hl::runtime::AuthAlert::SubscriptionInactive));
+            runtime.set_error(Some(
+                "Subscription inactive — renew to resume signing.".into(),
+            ));
+            false
+        }
+        Err(ServerError::Status(s, _)) if s == StatusCode::UNAUTHORIZED => {
+            warn!("token refresh unauthorized — session expired, re-run setup");
+            runtime.set_auth_alert(Some(crate::hl::runtime::AuthAlert::SessionExpired));
+            runtime.set_error(Some(
+                "Session expired — re-run setup to reconnect this device.".into(),
+            ));
+            false
+        }
+        Err(e) => {
+            // Transient (network / 5xx) — leave any existing alert, retry.
+            warn!(?e, "token refresh failed — will retry");
+            false
         }
     }
 }

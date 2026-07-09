@@ -39,6 +39,9 @@ export interface ClientCardProps {
   onStartSession: (c: ClientInfo) => void;
   onArm: (s: BotPreset) => void;
   onStop: (s: BotPreset) => void;
+  /** When true the wrapper (WalletAccordion) owns the jump-anchor id, so
+   * the card must not also emit it (duplicate ids are invalid). */
+  anchorOnWrapper?: boolean;
 }
 
 export function ClientCard({
@@ -51,6 +54,7 @@ export function ClientCard({
   unlocked,
   busy,
   sessionBusy,
+  anchorOnWrapper,
   onToggleActive,
   onRename,
   onSetPrimary,
@@ -122,9 +126,11 @@ export function ClientCard({
 
   return (
     // The id is the Running-now "Manage" jump target (features/bots/RunningNow).
+    // Inside the accordion the wrapper carries the id instead (it stays
+    // visible while the body is collapsed), so we suppress it here.
     <section
       className="card"
-      id={c.address ? `sol-wallet-${c.address}` : undefined}
+      id={!anchorOnWrapper && c.address ? `sol-wallet-${c.address}` : undefined}
       aria-label={c.label ?? c.address}
     >
       {/* identity row */}
@@ -221,7 +227,8 @@ export function ClientCard({
         </div>
       </div>
 
-      {/* stat line */}
+      {/* stat line — min-height keeps the row stable when balance/uPnL
+          change digit-length on the 10s fleet poll. */}
       <div
         style={{
           display: "flex",
@@ -230,25 +237,29 @@ export function ClientCard({
           marginTop: 12,
           paddingTop: 10,
           borderTop: "1px solid rgb(var(--line) / 0.1)",
+          minHeight: 42,
         }}
       >
-        <CardStat label="Balance">
+        <CardStat label="Balance" hint="Wallet SOL balance">
           {balance ? (
-            <Ticker value={Number(balance.sol_ui)} format={(n) => `${n} SOL`} />
+            <Ticker value={Number(balance.sol_ui)} format={(n) => `${n} SOL`} animate={false} />
           ) : (
             <span style={{ color: "var(--fg-faint)" }} title="Balance not fetched yet">
               —
             </span>
           )}
         </CardStat>
-        <CardStat label="uPnL">
+        <CardStat label="uPnL" hint="Unrealized PnL across this wallet's open positions">
           <Ticker
             value={pnl}
             format={(n) => `${n > 0 ? "+" : ""}${fmtUsd(n)}`}
             className={pnl ? (pnl > 0 ? "pos" : "neg") : ""}
+            animate={false}
           />
         </CardStat>
-        <CardStat label="Positions">{positions ?? "—"}</CardStat>
+        <CardStat label="Positions" hint="Open positions on this wallet">
+          {positions ?? "—"}
+        </CardStat>
         <CardStat label="Budget">
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
             <span className="mono" style={{ fontSize: 12 }}>
@@ -304,31 +315,46 @@ export function ClientCard({
             </button>
           )}
         </div>
-        {sessions.length === 0 && !sessionsLoading && remote ? (
-          <p className="empty" style={{ margin: 0, padding: "6px 0" }}>
-            No sessions on this wallet.
-          </p>
-        ) : (
-          <SessionList
-            sessions={sessions}
-            armedIds={armedIds}
-            unlocked={unlocked}
-            busy={sessionBusy}
-            walletIsPrimary={c.primary}
-            loading={sessionsLoading}
-            onArm={onArm}
-            onStop={onStop}
-          />
-        )}
+        {/* min-height reserves space so the skeleton→rows→empty transitions
+            don't shift the card on the 10s poll. */}
+        <div style={{ minHeight: 96 }}>
+          {sessions.length === 0 && !sessionsLoading && remote ? (
+            <p className="empty" style={{ margin: 0, padding: "6px 0" }}>
+              No sessions on this wallet.
+            </p>
+          ) : (
+            <SessionList
+              sessions={sessions}
+              armedIds={armedIds}
+              unlocked={unlocked}
+              busy={sessionBusy}
+              walletIsPrimary={c.primary}
+              loading={sessionsLoading}
+              onArm={onArm}
+              onStop={onStop}
+            />
+          )}
+        </div>
       </div>
     </section>
   );
 }
 
-function CardStat({ label, children }: { label: string; children: ReactNode }) {
+function CardStat({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
-    <div style={{ display: "grid", gap: 2 }}>
-      <span className="hud-label">{label}</span>
+    // min-width stops a value's digit-length change from reflowing the row.
+    <div style={{ display: "grid", gap: 2, minWidth: 85 }}>
+      <span className="hud-label" title={hint}>
+        {label}
+      </span>
       <span style={{ fontSize: 13, color: "var(--fg)", fontVariantNumeric: "tabular-nums" }}>
         {children}
       </span>

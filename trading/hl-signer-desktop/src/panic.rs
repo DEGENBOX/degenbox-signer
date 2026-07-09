@@ -220,6 +220,25 @@ pub async fn run_panic(
                             Some(e.clone()),
                         );
                     }
+                    Some(OrderStatusEntry::WaitingTrigger) => {
+                        // A reduce-only market close should never rest as a
+                        // trigger, but the variant exists on the enum — treat it
+                        // as an accepted/armed submission (like Resting), not an
+                        // error, so a panic-close is never mis-logged as failed.
+                        println!(
+                            "  {} {} close armed (waiting) — re-run if it didn't fill",
+                            branding::warn("~"),
+                            p.coin
+                        );
+                        record(
+                            &audit,
+                            "panic_close",
+                            Some(p.coin.clone()),
+                            "submitted",
+                            None,
+                            None,
+                        );
+                    }
                     None => {
                         println!(
                             "  {} {} close — no status returned",

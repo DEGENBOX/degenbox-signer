@@ -38,6 +38,19 @@ fn truncate_body(s: &str) -> String {
     s.to_string()
 }
 
+/// Decode a JWT's `exp` (unix seconds) from its payload segment WITHOUT
+/// verifying the signature. Best-effort: any structural problem yields
+/// `None` so the caller falls back to its TTL backstop.
+fn jwt_exp_unix(token: &str) -> Option<i64> {
+    use base64::Engine;
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("exp").and_then(|e| e.as_i64())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RegisterReq {
     pub agent_address: String,
@@ -51,6 +64,16 @@ pub struct RegisterReq {
     /// coalesce-preserves an existing pairing when the field is omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paired_with_account: Option<String>,
+}
+
+/// `POST /signer/refresh-token` response — a freshly minted 30-day signer
+/// JWT plus its expiry, or (on 402) a `subscription_inactive` error the
+/// daemon surfaces verbatim.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefreshTokenResp {
+    pub api_token: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,7 +209,11 @@ fn pending_params(
 pub struct ServerClient {
     http: Client,
     base: String,
-    token: String,
+    /// Shared, swappable so a proactive `refresh_token` can rotate the JWT
+    /// in-place across every clone of this client (daemon holds several)
+    /// without a restart. Reads clone the ~200-byte string; the cost is
+    /// irrelevant against the network hop it precedes.
+    token: std::sync::Arc<std::sync::RwLock<String>>,
 }
 
 impl ServerClient {
@@ -200,8 +227,57 @@ impl ServerClient {
         Ok(Self {
             http,
             base: base.trim_end_matches('/').to_string(),
-            token,
+            token: std::sync::Arc::new(std::sync::RwLock::new(token)),
         })
+    }
+
+    /// Current bearer token (owned snapshot).
+    fn token(&self) -> String {
+        self.token.read().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Swap the bearer token in-place across all clones (proactive refresh).
+    pub fn set_token(&self, new: String) {
+        if let Ok(mut g) = self.token.write() {
+            *g = new;
+        }
+    }
+
+    /// Seconds until the current signer JWT's `exp`, or `None` if the token
+    /// can't be decoded (malformed / not a JWT). Negative once expired. The
+    /// refresh loop uses this to renew BEFORE the 30-day TTL elapses. We do
+    /// NOT verify the signature — it's our own token and we only need the
+    /// claimed expiry to schedule a renewal.
+    pub fn token_seconds_remaining(&self) -> Option<i64> {
+        let exp = jwt_exp_unix(&self.token())?;
+        Some(exp - Utc::now().timestamp())
+    }
+
+    /// Proactively mint a fresh signer JWT while the current one is still
+    /// valid. Gateway re-checks the live subscription (grace/exempt
+    /// honoured) and mints a new 30-day token, or returns 402 when the
+    /// subscription has truly lapsed. The daemon calls this before the TTL
+    /// elapses so it never hits the ExpiredSignature 401 loop. On success
+    /// the new token is NOT auto-swapped here — the caller persists it to
+    /// disk first, then calls `set_token`, so a crash between the two can't
+    /// lose the only valid credential.
+    pub async fn refresh_token(&self) -> Result<RefreshTokenResp, ServerError> {
+        let url = format!(
+            "{}/api/hyperliquid/exchange/signer/refresh-token",
+            self.base
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(self.token())
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ServerError::Status(status, truncate_body(&text)));
+        }
+        serde_json::from_str(&text).map_err(|e| ServerError::Status(status, format!("decode: {e}")))
     }
 
     /// Redeem a one-shot onboarding registration token. No bearer auth —
@@ -231,7 +307,7 @@ impl ServerClient {
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token())
             .json(body)
             .send()
             .await?;
@@ -249,7 +325,12 @@ impl ServerClient {
     /// unpaired, revoked, …).
     pub async fn pairing(&self) -> Result<PairingStatus, ServerError> {
         let url = format!("{}/api/hyperliquid/exchange/signer/pairing", self.base);
-        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.token())
+            .send()
+            .await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -287,7 +368,7 @@ impl ServerClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token())
             .query(&params)
             .send()
             .await?;
@@ -317,7 +398,7 @@ impl ServerClient {
         bypass_token: Option<&str>,
     ) -> Result<(), ServerError> {
         let url = format!("{}/api/hyperliquid/exchange/order/result", self.base);
-        let mut builder = self.http.post(&url).bearer_auth(&self.token).json(body);
+        let mut builder = self.http.post(&url).bearer_auth(self.token()).json(body);
         if let Some(tok) = bypass_token {
             builder = builder.header("X-Totp-Bypass", tok);
         }
@@ -370,7 +451,7 @@ impl ServerClient {
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token())
             .json(&body)
             .send()
             .await?;
@@ -391,7 +472,7 @@ impl ServerClient {
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(self.token())
             .json(&body)
             .send()
             .await?;
@@ -439,6 +520,26 @@ mod tests {
     fn totp_challenge_handles_malformed_body() {
         assert!(ServerClient::parse_totp_challenge("not json").is_none());
         assert!(ServerClient::parse_totp_challenge("{}").is_none());
+    }
+
+    #[test]
+    fn jwt_exp_unix_decodes_payload_without_verifying() {
+        // Minimal JWT: header.payload.sig — only the payload's `exp` matters.
+        use base64::Engine;
+        let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let token = format!(
+            "{}.{}.{}",
+            b64(r#"{"alg":"HS256","typ":"JWT"}"#),
+            b64(r#"{"sub":"u1","exp":1893456000}"#),
+            "sig-ignored"
+        );
+        assert_eq!(jwt_exp_unix(&token), Some(1_893_456_000));
+        // Structurally broken inputs degrade to None (caller falls back to
+        // its TTL backstop) rather than panicking.
+        assert_eq!(jwt_exp_unix("not-a-jwt"), None);
+        assert_eq!(jwt_exp_unix(""), None);
+        let no_exp = format!("{}.{}.{}", b64("{}"), b64(r#"{"sub":"u1"}"#), "s");
+        assert_eq!(jwt_exp_unix(&no_exp), None);
     }
 
     #[test]

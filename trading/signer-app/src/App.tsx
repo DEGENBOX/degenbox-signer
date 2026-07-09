@@ -53,7 +53,7 @@ type Tab = "live" | "bots";
 
 const TABS: { id: Tab; label: string; num: string; key: string }[] = [
   { id: "live", label: "Live", num: "01", key: "1" },
-  { id: "bots", label: "Bots", num: "02", key: "2" },
+  { id: "bots", label: "Bots & Settings", num: "02", key: "2" },
 ];
 
 const TAB_KEY = "degenbox.signer.tab";
@@ -448,7 +448,7 @@ export function App() {
               Account and the other tab stay usable. */}
           <ErrorBoundary
             key={`${mode}-${tab}`}
-            label={`${mode === "sol" ? "Solana" : "Perpetuals"} · ${tab === "live" ? "Live" : "Bots"}`}
+            label={`${mode === "sol" ? "Solana" : "Perpetuals"} · ${tab === "live" ? "Live" : "Bots & Settings"}`}
           >
             <div className="tab-pane">
               {tab === "live" &&

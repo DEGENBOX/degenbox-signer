@@ -473,10 +473,15 @@ export function Ticker({
   value,
   format,
   className,
+  /** Flash tick-up/tick-down on change. Off for daemon-polled values
+   * (balance/uPnL) where the flash is distracting; on for user-triggered
+   * updates. Defaults to true (unchanged behaviour). */
+  animate = true,
 }: {
   value: number | null;
   format: (n: number) => ReactNode;
   className?: string;
+  animate?: boolean;
 }) {
   const [tick, setTick] = useState("");
   const prev = useRef<number | null>(null);
@@ -484,12 +489,12 @@ export function Ticker({
   useEffect(() => {
     const p = prev.current;
     prev.current = value;
-    if (value != null && p != null && value !== p) {
+    if (animate && value != null && p != null && value !== p) {
       setTick(value > p ? "tick-up" : "tick-down");
       const id = setTimeout(() => setTick(""), 900);
       return () => clearTimeout(id);
     }
-  }, [value]);
+  }, [value, animate]);
 
   if (value == null) return <span className={className}>—</span>;
   return <span className={`${className ?? ""} ${tick}`}>{format(value)}</span>;

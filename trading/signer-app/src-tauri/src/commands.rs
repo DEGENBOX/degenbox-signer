@@ -19,7 +19,7 @@
 
 use crate::hl::config::{HlConfig, NetworkChoice};
 use crate::hl::daemon::{self, DaemonOpts};
-use crate::hl::runtime::{BalanceSnapshot, ConnState, TotpPrompt};
+use crate::hl::runtime::{AuthAlert, BalanceSnapshot, ConnState, TotpPrompt};
 use crate::hl::server::{
     RedeemRegistrationReq, RegisterReq as HlRegisterReq, ServerClient, ServerError,
 };
@@ -815,6 +815,9 @@ pub struct HlStatusReport {
     pub queue_pending: usize,
     pub last_poll_at: Option<String>,
     pub error: Option<String>,
+    /// Distinct auth-layer condition (`session_expired` / `subscription_inactive`)
+    /// so the dashboard renders an actionable panel instead of a raw 401.
+    pub auth_alert: Option<AuthAlert>,
     pub balance: BalanceSnapshotDto,
     /// A pending TOTP challenge the GUI must answer, if any.
     pub totp_prompt: Option<TotpPrompt>,
@@ -910,6 +913,7 @@ pub fn hl_status(state: State<'_, AppState>) -> Result<HlStatusReport, String> {
             .and_then(|g| *g)
             .map(|t| t.to_rfc3339()),
         error: rt.error.lock().ok().and_then(|g| g.clone()),
+        auth_alert: rt.auth_alert.lock().ok().and_then(|g| *g),
         balance: balance.into(),
         totp_prompt: rt.totp_prompt.lock().ok().and_then(|g| g.clone()),
     })

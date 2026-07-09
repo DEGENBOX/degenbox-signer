@@ -194,7 +194,8 @@ export function ExecutorCard({
         </div>
       </div>
 
-      {/* stat line */}
+      {/* stat line — min-height keeps the row from jittering when a value
+          changes digit-length on the 2s poll. */}
       <div
         style={{
           display: "flex",
@@ -203,9 +204,17 @@ export function ExecutorCard({
           marginTop: 12,
           paddingTop: 10,
           borderTop: "1px solid rgb(var(--line) / 0.1)",
+          minHeight: 42,
         }}
       >
-        <CardStat label={isUnified ? "Balance" : "Perp equity"}>
+        <CardStat
+          label={isUnified ? "Balance" : "Perp equity"}
+          hint={
+            isUnified
+              ? "Account value (unified — spot backs perp automatically)"
+              : "Perp equity (spot shown separately)"
+          }
+        >
           {acctValue != null ? (
             <Ticker value={acctValue} format={(n) => fmtUsdOrDash(n)} />
           ) : (
@@ -226,18 +235,18 @@ export function ExecutorCard({
             )}
           </CardStat>
         )}
-        <CardStat label="Withdrawable">{fmtUsdOrDash(hl.balance.withdrawable_usd)}</CardStat>
-        <CardStat label="Queue">
-          <span title="Orders the gateway has queued for this device to sign">
-            {hl.queue_pending}
-          </span>
+        <CardStat label="Withdrawable" hint="Withdrawable USDC">
+          {fmtUsdOrDash(hl.balance.withdrawable_usd)}
         </CardStat>
-        <CardStat label="Network">
+        <CardStat label="Queue" hint="Orders the gateway has queued for this device to sign">
+          {hl.queue_pending}
+        </CardStat>
+        <CardStat label="Network" hint="Hyperliquid network this executor is bound to">
           <span className="mono" style={{ fontSize: 12 }}>
             {hl.network}
           </span>
         </CardStat>
-        <CardStat label="Last poll">
+        <CardStat label="Last poll" hint="Time since the daemon last polled the gateway">
           <span className="mono" style={{ fontSize: 12 }}>
             {hl.last_poll_at ? timeAgo(hl.last_poll_at) : "—"}
           </span>
@@ -287,14 +296,34 @@ export function ExecutorCard({
         />
       )}
 
-      {hl.error && (
+      {hl.auth_alert === "session_expired" ? (
         <div className="error-box" style={{ marginTop: 12 }}>
-          {hl.error}
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Session expired</div>
+          <div style={{ marginBottom: 8, opacity: 0.85 }}>
+            This device's signing session expired. Re-run setup to reconnect —
+            your account, balance, and open positions are unaffected.
+          </div>
+          <button className="btn sm" onClick={onRerunSetup}>
+            Re-run setup
+          </button>
         </div>
-      )}
+      ) : hl.auth_alert === "subscription_inactive" ? (
+        <div className="error-box" style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            Subscription inactive
+          </div>
+          <div style={{ opacity: 0.85 }}>
+            Signing is paused because your subscription lapsed. Renew it to
+            resume — the signer reconnects automatically, no re-setup needed.
+          </div>
+        </div>
+      ) : hl.error ? (
+        <div className="error-box" style={{ marginTop: 12 }}>{hl.error}</div>
+      ) : null}
 
-      {/* pairing block */}
-      <div style={{ marginTop: 14 }}>
+      {/* pairing block — min-height reserves space so a paired/not-paired
+          flip on poll doesn't jump the card. */}
+      <div style={{ marginTop: 14, minHeight: 96 }}>
         <div
           style={{
             display: "flex",
@@ -409,10 +438,21 @@ export function ExecutorCard({
   );
 }
 
-function CardStat({ label, children }: { label: string; children: ReactNode }) {
+function CardStat({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
-    <div style={{ display: "grid", gap: 2 }}>
-      <span className="hud-label">{label}</span>
+    // min-width stops a value's digit-length change from reflowing the row.
+    <div style={{ display: "grid", gap: 2, minWidth: 80 }}>
+      <span className="hud-label" title={hint}>
+        {label}
+      </span>
       <span style={{ fontSize: 13, color: "var(--fg)", fontVariantNumeric: "tabular-nums" }}>
         {children}
       </span>

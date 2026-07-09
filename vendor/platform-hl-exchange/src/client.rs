@@ -64,6 +64,12 @@ pub enum OrderStatusEntry {
         total_sz: String,
         avg_px: String,
     },
+    /// A resting/armed order that HL reports as a bare-string status
+    /// (`"waitingForTrigger"` for an armed trigger order not yet fired,
+    /// `"waitingForFill"` for a resting order awaiting a fill). The order
+    /// was ACCEPTED — this is a success/armed state, NOT an error. HL
+    /// returns no `oid` on these bare-string rows.
+    WaitingTrigger,
     Error(String),
 }
 
@@ -392,8 +398,15 @@ fn parse_order_result(env: &ExchangeResponse) -> Result<OrderResult, ExchangeErr
 
     let mut out = Vec::with_capacity(statuses.len());
     for s in statuses {
-        if let Some(err) = s.as_str() {
-            out.push(OrderStatusEntry::Error(err.to_string()));
+        if let Some(bare) = s.as_str() {
+            // HL reports an armed trigger / resting order as a bare string.
+            // These are ACCEPTED orders, not rejects — never classify them
+            // as an Error (an armed TP/SL was being recorded as FAILED).
+            if bare == "waitingForTrigger" || bare == "waitingForFill" {
+                out.push(OrderStatusEntry::WaitingTrigger);
+            } else {
+                out.push(OrderStatusEntry::Error(bare.to_string()));
+            }
             continue;
         }
         if let Some(r) = s.get("resting") {
@@ -468,6 +481,7 @@ impl std::fmt::Debug for OrderStatusEntry {
             } => {
                 write!(f, "Filled(oid={oid}, sz={total_sz}, px={avg_px})")
             }
+            OrderStatusEntry::WaitingTrigger => write!(f, "WaitingTrigger"),
             OrderStatusEntry::Error(s) => write!(f, "Error({s})"),
         }
     }
@@ -536,6 +550,31 @@ mod tests {
         match &r.statuses[2] {
             OrderStatusEntry::Error(s) => assert_eq!(s, "tooSmall"),
             o => panic!("expected error, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_order_result_treats_waiting_trigger_as_armed_not_error() {
+        // HL reports an armed (resting) trigger order as a bare string.
+        // It must parse to the non-error armed variant — regression guard
+        // for #5 (armed TP/SL wrongly recorded as FAILED).
+        for status in ["waitingForTrigger", "waitingForFill"] {
+            let env = ExchangeResponse {
+                status: "ok".into(),
+                response: Some(serde_json::json!({
+                    "type": "order",
+                    "data": {"statuses": [status]},
+                })),
+            };
+            let r = parse_order_result(&env).unwrap();
+            assert_eq!(r.statuses.len(), 1);
+            match &r.statuses[0] {
+                OrderStatusEntry::WaitingTrigger => {}
+                OrderStatusEntry::Error(e) => {
+                    panic!("{status} must not be an Error, got Error({e})")
+                }
+                o => panic!("expected WaitingTrigger for {status}, got {o:?}"),
+            }
         }
     }
 

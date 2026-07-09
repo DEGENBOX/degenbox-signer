@@ -19,11 +19,31 @@ export const WALLETS_ANCHOR = "sol-wallets";
 export const COPY_ANCHOR = "sol-copytrade";
 export const walletAnchor = (address: string) => `sol-wallet-${address}`;
 
-function jumpTo(id: string) {
-  // Instant on purpose: the tab's polling re-renders cancel Chromium's
-  // smooth scroll inside the nested .shell-main container (verified in
-  // preview), which would leave the button doing nothing.
-  document.getElementById(id)?.scrollIntoView({ block: "start" });
+/** Fired before a wallet jump so the Bots accordion can expand the
+ * target wallet (its body is collapsed by default). Detail = wallet
+ * address, or null for the generic "wallets" anchor. */
+export const WALLET_JUMP_EVENT = "dbx:wallet-jump";
+
+/** Fired when a Manage jump needs the parent tab to switch its config
+ * sub-nav to the section that owns `anchor` (R5 sub-nav). Detail =
+ * `{ sub: "wallets" | "copy", anchor }`. The parent switches the sub-tab
+ * and — after the target section has mounted — scrolls to `anchor`, so the
+ * jump works even when that section was on an inactive sub-tab. */
+export const BOTS_SUBTAB_EVENT = "dbx:bots-subtab";
+
+function jumpTo(id: string, walletAddress?: string | null) {
+  // Ask the accordion to open the target wallet first, so the jump lands
+  // on an expanded card instead of a collapsed header.
+  window.dispatchEvent(
+    new CustomEvent(WALLET_JUMP_EVENT, { detail: walletAddress ?? null }),
+  );
+  // Tell the parent which config sub-tab owns this anchor. The parent
+  // switches to it and does the scroll AFTER the section mounts (a bare
+  // rAF-scroll here would race React's commit and land on nothing).
+  const sub = id === COPY_ANCHOR ? "copy" : "wallets";
+  window.dispatchEvent(
+    new CustomEvent(BOTS_SUBTAB_EVENT, { detail: { sub, anchor: id } }),
+  );
 }
 
 export function RunningNow({
@@ -83,7 +103,7 @@ export function RunningNow({
                 (clients ?? []).some((c) => c.address === s.wallet_pubkey);
               const meta = [
                 `${fmtSol(s.spent_lamports)} / ${fmtSol(s.budget_lamports)} SOL`,
-                `${s.fill_count} fill${s.fill_count === 1 ? "" : "s"}`,
+                `${s.fill_count} Fill${s.fill_count === 1 ? "" : "s"}`,
                 s.expires_at
                   ? new Date(s.expires_at) > new Date()
                     ? `ends in ${fmtIn(s.expires_at)}`
@@ -129,6 +149,7 @@ export function RunningNow({
                     onClick={() =>
                       jumpTo(
                         knownWallet ? walletAnchor(s.wallet_pubkey!) : WALLETS_ANCHOR,
+                        knownWallet ? s.wallet_pubkey : null,
                       )
                     }
                   >
@@ -153,8 +174,8 @@ export function RunningNow({
                   <span className="run-kind hud-label">copy</span>
                   <span className="run-main">
                     <strong>{c.label}</strong>
-                    <span className="run-sub">
-                      {shortAddr(c.leader, 5, 4)} · {sizingSummary(c)} ·{" "}
+                    <span className="run-sub" title={c.leader}>
+                      {shortAddr(c.leader, 6, 6)} · {sizingSummary(c)} ·{" "}
                       {sellSummary(c)}
                     </span>
                   </span>

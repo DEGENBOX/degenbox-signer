@@ -122,7 +122,9 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
       </div>
 
       {!paired ? (
-        <div className="border border-line/10">
+        // Reserve the paired-card height so a pairing flip on poll doesn't
+        // jump the strip from ~80px to ~180px.
+        <div className="border border-line/10" style={{ minHeight: 128 }}>
           <EmptyState
             icon={<Link2 size={18} />}
             title={hl === null ? "Loading account…" : "Not paired yet"}
@@ -132,7 +134,7 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
       ) : (
         <div
           className="grid gap-px bg-line/10 border border-line/10"
-          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", minHeight: 128 }}
         >
           <div className="bg-canvas px-3 py-2.5">
             <div className="flex items-baseline gap-2 min-w-0">
@@ -145,14 +147,17 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
               </span>
             </div>
             <div
-              className="mt-0.5 text-[10px] font-mono text-ink-4 uppercase tracking-wider truncate"
+              className="mt-0.5 text-[10px] font-mono text-ink-4 tracking-wider truncate"
               title={hl?.agent_address ?? undefined}
             >
               {hl?.agent_address
                 ? `agent ${shortAddr(hl.agent_address, 6, 4)}`
                 : "no agent wallet"}
             </div>
-            <div className="mt-1.5 flex items-baseline gap-3 font-mono tabular-nums text-[11px]">
+            <div
+              className="mt-1.5 flex flex-wrap items-baseline gap-3 font-mono tabular-nums text-[11px]"
+              style={{ minHeight: 18 }}
+            >
               <span
                 title={`${
                   isUnified
@@ -196,7 +201,8 @@ export function AccountStrip({ hl, upnlUsd }: Props) {
               </span>
             </div>
             <div
-              className="mt-1 flex items-baseline gap-3 font-mono tabular-nums text-[11px]"
+              className="mt-1 flex flex-wrap items-baseline gap-3 font-mono tabular-nums text-[11px]"
+              style={{ minHeight: 18 }}
               title="Realized PnL (USD): 1d / 7d / 30d"
             >
               {WINDOW_KEYS.map((k, i) => {

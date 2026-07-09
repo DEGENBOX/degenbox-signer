@@ -387,6 +387,9 @@ async fn execute_order(
                     None,
                     fill_usd(total_sz, avg_px),
                 ),
+                // An armed trigger / resting order was ACCEPTED — report it
+                // as submitted (non-failed), never as an error.
+                Some(OrderStatusEntry::WaitingTrigger) => (None, "submitted", None, None),
                 Some(OrderStatusEntry::Error(e)) => (None, "failed", Some(e.clone()), None),
                 None => (None, "failed", Some("no status returned".into()), None),
             };
@@ -927,6 +930,9 @@ async fn submit_reduce_only_market(
                     None,
                     fill_usd(total_sz, avg_px),
                 ),
+                // An armed trigger / resting order was ACCEPTED — report it
+                // as submitted (non-failed), never as an error.
+                Some(OrderStatusEntry::WaitingTrigger) => (None, "submitted", None, None),
                 Some(OrderStatusEntry::Error(e)) => (None, "failed", Some(e.clone()), None),
                 None => (None, "failed", Some("no status returned".into()), None),
             };
@@ -1058,6 +1064,9 @@ async fn execute_place_tpsl(
                     // HL fires immediately. Still a successful path.
                     (Some(*oid as i64), "filled", None)
                 }
+                // Armed but not yet fired — the expected good-path outcome
+                // for a trigger order that HL reports as a bare string.
+                Some(OrderStatusEntry::WaitingTrigger) => (None, "submitted", None),
                 Some(OrderStatusEntry::Error(e)) => (None, "failed", Some(e.clone())),
                 None => (None, "failed", Some("no status returned".into())),
             };
