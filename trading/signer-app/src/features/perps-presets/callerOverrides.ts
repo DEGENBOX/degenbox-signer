@@ -6,29 +6,27 @@
 // variants mirror the Rust `CreateSubReq`
 // (crates/modules/execution-computer/src/domain.rs); bps columns are
 // surfaced as human percents and converted at the wire boundary here.
+//
+// Flat-form rebuild (operator feedback, 2026-07): the editor shows one
+// always-visible column of the settings that map 1:1 to how a call
+// flows through the bot — sizing tiers, leverage, max position, stop
+// fallback, DCA, markets, safety, entry ranges. The power fields that
+// duplicated or muddied those (size_multiplier, max_size_usd,
+// sizing_pct_equity, size_basis, size_meaning, leverage_cap,
+// margin_mode, tp_close_percent) are gone from BOTH the UI and the
+// save payload — their keys are simply never sent, so on an existing
+// sub PATCH omits them and the stored column is left untouched.
 
 import type { CreateSubBody, ExecSubscription } from "./ipc";
 
 // ─── enum variants (mirror computer.rs constants) ──────────────────
 
-/** `sizing_mode` — how the base size is derived. */
+/** `sizing_mode` — how the base size is derived. Not a user toggle
+ * anymore: it is DERIVED at save time from whether a fixed $ per trade
+ * was entered (0 = fixed USD, 1 = percent-of-account tiers). */
 export const SIZING_MODE = [
   { value: 0, label: "Fixed USD" },
   { value: 1, label: "% of account" },
-] as const;
-
-/** `size_basis` — which account metric the %-of-account path reads. */
-export const SIZE_BASIS = [
-  { value: 0, label: "Equity" },
-  { value: 1, label: "Balance" },
-  { value: 2, label: "Available" },
-] as const;
-
-/** `size_meaning` — what the resolved size USD represents. */
-export const SIZE_MEANING = [
-  { value: 0, label: "Position notional" },
-  { value: 1, label: "Margin posted" },
-  { value: 2, label: "Max risk (SL)" },
 ] as const;
 
 /** `zone_strategy` — how an entry zone fans into limit orders. */
@@ -45,18 +43,12 @@ export const MARKET_FILTER_MODE = [
   { value: 2, label: "Blacklist" },
 ] as const;
 
-/** `manual_sl_action` — derive a stop when the signal carries none. */
+/** `manual_sl_action` — derive a stop when the signal carries none.
+ * Trailing (2) is still honoured by the engine but is no longer an
+ * option in this editor; only No stop / Fixed % are offered. */
 export const MANUAL_SL_ACTION = [
-  { value: 0, label: "Off" },
+  { value: 0, label: "No stop" },
   { value: 1, label: "Fixed %" },
-  { value: 2, label: "Trailing %" },
-] as const;
-
-/** `margin_mode` — null = inherit caller default. 0 = isolated,
- * 1 = cross (MARGIN_MODE_* in computer.rs). */
-export const MARGIN_MODE = [
-  { value: 0, label: "Isolated" },
-  { value: 1, label: "Cross" },
 ] as const;
 
 // ─── editable form state ───────────────────────────────────────────
@@ -64,31 +56,26 @@ export const MARGIN_MODE = [
 /** String-typed mirror of every editable override. Empty string =
  * unset ("inherit caller default" / keep backend default). */
 export interface OverrideState {
-  // Sizing
-  sizingMode: string; // enum int as string, non-null default "0"
-  sizeUsdOverride: string; // USD, nullable
-  sizingPctEquity: string; // percent (UI) → bps wire, nullable
-  sizeBasis: string; // enum int, non-null default "0"
-  sizeMeaning: string; // enum int, non-null default "0"
+  // Sizing — headline is the three conviction tiers; the fixed $ is the
+  // small "instead" secondary. Which one wins is derived on save.
+  sizeUsdOverride: string; // USD, nullable → sizing_mode 0 when filled
   sizeLowPercent: string; // integer percent, nullable
   sizeNormalPercent: string; // integer percent, nullable
   sizeHighPercent: string; // integer percent, nullable
+  maxPositionUsd: string; // USD, nullable — shrink clamp
+  // Leverage
+  maxLeverage: string; // hard reject ceiling, nullable
+  // Risk / SL
+  manualSlAction: string; // enum int, non-null default "0"
+  manualSlPct: string; // integer percent, nullable
+  zoneStrategy: string; // enum int, non-null default "0"
+  slippagePct: string; // percent (UI) → bps wire (×100)
+  drawdownStopPct: string; // integer percent, nullable
+  // DCA
   /** UI holds a PERCENT of the entry size (100 = same size); the wire
    * field `dca_size_multiplier` stays a decimal multiplier. */
   dcaSizePct: string;
   skipDca: boolean;
-  maxPositionUsd: string; // USD, nullable
-  // Leverage
-  maxLeverage: string; // hard reject ceiling, nullable
-  leverageCap: string; // soft clamp, nullable
-  // Risk / SL
-  manualSlAction: string; // enum int, non-null default "0"
-  manualSlPct: string; // integer percent, nullable
-  tpClosePercent: string; // percent (UI) → bps wire (×100)
-  zoneStrategy: string; // enum int, non-null default "0"
-  slippagePct: string; // percent (UI) → bps wire (×100)
-  marginMode: string; // enum int ("" = inherit), nullable
-  drawdownStopPct: string; // integer percent, nullable
   // Markets filter
   marketFilterMode: string; // enum int, non-null default "0"
   marketFilterList: string; // comma/space list
@@ -101,26 +88,19 @@ export interface OverrideState {
 // preserved untouched (POST upsert + PATCH both keep omitted fields).
 
 export const EMPTY_OVERRIDES: OverrideState = {
-  sizingMode: "0",
   sizeUsdOverride: "",
-  sizingPctEquity: "",
-  sizeBasis: "0",
-  sizeMeaning: "0",
   sizeLowPercent: "",
   sizeNormalPercent: "",
   sizeHighPercent: "",
-  dcaSizePct: "",
-  skipDca: false,
   maxPositionUsd: "",
   maxLeverage: "",
-  leverageCap: "",
   manualSlAction: "0",
   manualSlPct: "",
-  tpClosePercent: "",
   zoneStrategy: "0",
   slippagePct: "",
-  marginMode: "",
   drawdownStopPct: "",
+  dcaSizePct: "",
+  skipDca: false,
   marketFilterMode: "0",
   marketFilterList: "",
 };
@@ -130,36 +110,31 @@ export const EMPTY_OVERRIDES: OverrideState = {
 const intStr = (v: number | null | undefined): string =>
   v === null || v === undefined ? "" : String(v);
 
-/** Seed override state from a subscription row. Non-null enum columns
- * fall back to "0"; nullable columns become "" ("inherit"). */
+/** Seed override state from a subscription row. Tiers come from the
+ * tier columns; the fixed $ is only surfaced when the stored row was
+ * in fixed-USD mode (`sizing_mode === 0`). Non-null enum columns fall
+ * back to "0"; nullable columns become "" ("inherit"). */
 export function overridesFromSub(sub: ExecSubscription): OverrideState {
-  const bpsToPct = (bps: number | null | undefined): string =>
-    bps === null || bps === undefined ? "" : trimPct(bps / 100);
-
   return {
-    sizingMode: intStr(sub.sizing_mode ?? 0),
-    sizeUsdOverride: sub.size_usd_override ?? "",
-    sizingPctEquity: bpsToPct(sub.sizing_pct_equity_bps),
-    sizeBasis: intStr(sub.size_basis ?? 0),
-    sizeMeaning: intStr(sub.size_meaning ?? 0),
+    sizeUsdOverride: sub.sizing_mode === 0 ? (sub.size_usd_override ?? "") : "",
     sizeLowPercent: intStr(sub.size_low_percent),
     sizeNormalPercent: intStr(sub.size_normal_percent),
     sizeHighPercent: intStr(sub.size_high_percent),
+    maxPositionUsd: sub.max_position_usd ?? "",
+    maxLeverage: intStr(sub.max_leverage),
+    manualSlAction: intStr(sub.manual_sl_action ?? 0),
+    manualSlPct: intStr(sub.manual_sl_pct),
+    zoneStrategy: intStr(sub.zone_strategy ?? 0),
+    slippagePct:
+      sub.slippage_limit_bps === null || sub.slippage_limit_bps === undefined
+        ? ""
+        : trimPct(sub.slippage_limit_bps / 100),
+    drawdownStopPct: intStr(sub.drawdown_stop_pct),
     dcaSizePct:
       sub.dca_size_multiplier != null && sub.dca_size_multiplier !== ""
         ? trimPct(Number(sub.dca_size_multiplier) * 100)
         : "",
     skipDca: sub.skip_dca ?? false,
-    maxPositionUsd: sub.max_position_usd ?? "",
-    maxLeverage: intStr(sub.max_leverage),
-    leverageCap: intStr(sub.leverage_cap),
-    manualSlAction: intStr(sub.manual_sl_action ?? 0),
-    manualSlPct: intStr(sub.manual_sl_pct),
-    tpClosePercent: bpsToPct(sub.tp_close_percent_bps),
-    zoneStrategy: intStr(sub.zone_strategy ?? 0),
-    slippagePct: bpsToPct(sub.slippage_limit_bps),
-    marginMode: intStr(sub.margin_mode),
-    drawdownStopPct: intStr(sub.drawdown_stop_pct),
     marketFilterMode: intStr(sub.market_filter_mode ?? 0),
     marketFilterList: (sub.market_filter_list ?? []).join(", "),
   };
@@ -199,10 +174,13 @@ const enumInt = (s: string): number => {
 /** Build the override slice of a `CreateSubBody` from form state →
  * `[partialBody, errors]`. Blank fields are sent as null (nullable
  * cols) or omitted (defaults); enum selects always send their int.
+ * `sizing_mode` is DERIVED: a filled "fixed $ per trade" saves
+ * fixed-USD mode (0), otherwise the percent-of-account tiers win (1).
  * On CREATE (POST upsert) a null falls back to the column default; on
  * EDIT the same body rides PATCH where an explicit null CLEARS the
  * column — so blanking a field genuinely unsets it. Fields the editor
- * no longer shows (ramp-in tier table, legacy market lists) are never
+ * no longer shows (size multiplier, size cap, size basis/meaning,
+ * leverage cap, margin mode, TP close %, ramp-in tier table) are never
  * sent and therefore never touched. */
 export function overridesToBody(
   st: OverrideState,
@@ -210,15 +188,26 @@ export function overridesToBody(
   const errors: OverrideError[] = [];
   const body: Partial<CreateSubBody> = {};
 
-  // Sizing
-  body.sizing_mode = enumInt(st.sizingMode);
-  body.size_usd_override = optStr(st.sizeUsdOverride);
-  body.sizing_pct_equity_bps = pctToBps(st.sizingPctEquity);
-  body.size_basis = enumInt(st.sizeBasis);
-  body.size_meaning = enumInt(st.sizeMeaning);
+  // Sizing — fixed $ filled → fixed-USD mode; else tier percents.
+  const fixedUsd = optStr(st.sizeUsdOverride);
+  body.sizing_mode = fixedUsd !== null ? 0 : 1;
+  body.size_usd_override = fixedUsd;
   body.size_low_percent = optInt(st.sizeLowPercent);
   body.size_normal_percent = optInt(st.sizeNormalPercent);
   body.size_high_percent = optInt(st.sizeHighPercent);
+  body.max_position_usd = optStr(st.maxPositionUsd);
+
+  // Leverage
+  body.max_leverage = optInt(st.maxLeverage);
+
+  // Risk / SL
+  body.manual_sl_action = enumInt(st.manualSlAction);
+  body.manual_sl_pct = optInt(st.manualSlPct);
+  body.zone_strategy = enumInt(st.zoneStrategy);
+  body.slippage_limit_bps = pctToBps(st.slippagePct) ?? undefined;
+  body.drawdown_stop_pct = optInt(st.drawdownStopPct);
+
+  // DCA
   {
     // Percent in the UI, decimal multiplier on the wire (100% → "1").
     const pct = optNum(st.dcaSizePct);
@@ -228,20 +217,6 @@ export function overridesToBody(
     body.dca_size_multiplier = pct === null ? null : trimPct(pct / 100);
   }
   body.skip_dca = st.skipDca;
-  body.max_position_usd = optStr(st.maxPositionUsd);
-
-  // Leverage
-  body.max_leverage = optInt(st.maxLeverage);
-  body.leverage_cap = optInt(st.leverageCap);
-
-  // Risk / SL
-  body.manual_sl_action = enumInt(st.manualSlAction);
-  body.manual_sl_pct = optInt(st.manualSlPct);
-  body.tp_close_percent_bps = pctToBps(st.tpClosePercent) ?? undefined;
-  body.zone_strategy = enumInt(st.zoneStrategy);
-  body.slippage_limit_bps = pctToBps(st.slippagePct) ?? undefined;
-  body.margin_mode = st.marginMode === "" ? null : enumInt(st.marginMode);
-  body.drawdown_stop_pct = optInt(st.drawdownStopPct);
 
   // Markets filter
   body.market_filter_mode = enumInt(st.marketFilterMode);
@@ -250,31 +225,19 @@ export function overridesToBody(
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
 
-  // Light cross-field sanity — the backend is the source of truth.
-  if (
-    enumInt(st.sizingMode) === 1 &&
-    body.sizing_pct_equity_bps === null &&
-    body.size_low_percent === null &&
-    body.size_normal_percent === null &&
-    body.size_high_percent === null
-  ) {
-    errors.push({
-      field: "sizingPctEquity",
-      message:
-        "% of account sizing needs either a % of equity or at least one tier %.",
-    });
-  }
+  // Light numeric sanity — the backend is the source of truth, and an
+  // all-empty size is allowed (falls back to the caller default).
   if (enumInt(st.manualSlAction) !== 0 && body.manual_sl_pct === null) {
     errors.push({
       field: "manualSlPct",
-      message: "Set the stop distance % for the selected SL action.",
+      message: "Set the stop distance % for the fixed stop.",
     });
   }
 
   return [body, errors];
 }
 
-// percent string → integer bps (×100). 33.33% → 3333. Blank → null.
+// percent string → integer bps (×100). 0.5% → 50. Blank → null.
 function pctToBps(s: string): number | null {
   const n = optNum(s);
   if (n === null) return null;

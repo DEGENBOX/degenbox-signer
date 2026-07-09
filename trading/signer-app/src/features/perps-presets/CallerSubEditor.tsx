@@ -1,14 +1,20 @@
 // Caller-subscription editor — the per-caller execution settings the
 // bot applies to every parsed signal.
 //
-// v0.3.2 semantics rebuild (operator feedback R3, see
-// docs/archive/perps-settings-semantics-2026-07-06.md): the MAIN editor
-// shows exactly the settings that map 1:1 to how a call flows through
-// the bot — a call says size / leverage / entries / TPs / SL, plus adds
-// (DCA) and the markets it fires on; the user scales or caps those.
-// Advanced keeps the justified power fields with honest names. "Ramp-in
-// tiers" (tier_table_json) is gone from the UI entirely — the engine
-// still reads the column and any stored table is preserved on save.
+// Flat-form rebuild (operator feedback, 2026-07): every section is
+// always visible in one column — no Advanced disclosure, one Save. The
+// editor shows exactly the settings that map 1:1 to how a call flows
+// through the bot: size (three conviction tiers as a share of your
+// account, or a fixed $ instead), leverage, max position, the stop to
+// use when a call carries none, DCA, markets, safety and how entry
+// ranges fan out. Take-profits have no field — they split equally
+// across the call's targets and caller-named per-target sizes win.
+//
+// Fields that duplicated or muddied those (size multiplier, size cap,
+// share-of-account %, size basis/meaning, leverage cap, margin mode,
+// per-TP close %, trailing stop) are gone from the UI AND the save
+// payload — their keys are never sent, so on an existing follow PATCH
+// omits them and the stored column stays untouched.
 //
 // Save wiring: a NEW follow rides `POST /api/exec/subscriptions`
 // (upsert). An EXISTING follow rides `POST /api/exec/subscriptions/{id}`
@@ -17,7 +23,7 @@
 // this editor doesn't show are never sent, so they are never touched.
 
 import { useEffect, useState } from "react";
-import { ChevronRight, Save, Trash2 } from "lucide-react";
+import { Save, Trash2 } from "lucide-react";
 import { DangerConfirm, Segmented } from "../../components/ui";
 import { CheckField, Field, FormGroup, InlineEditor, NumField, TextField } from "../../components/form";
 import {
@@ -32,12 +38,8 @@ import {
 } from "./ipc";
 import {
   EMPTY_OVERRIDES,
-  MANUAL_SL_ACTION,
-  MARGIN_MODE,
   overridesFromSub,
   overridesToBody,
-  SIZE_BASIS,
-  SIZE_MEANING,
   type OverrideError,
   type OverrideState,
 } from "./callerOverrides";
@@ -60,12 +62,8 @@ function FieldError({ msg }: { msg: string | undefined }) {
 
 export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
   const [enabled, setEnabled] = useState(true);
-  // Percent of the caller's size (wire: `size_multiplier`, 100% = 1.0).
-  const [sizePct, setSizePct] = useState("100");
-  const [sizeCapUsd, setSizeCapUsd] = useState("");
   const [leverageOverride, setLeverageOverride] = useState("");
   const [overrides, setOverrides] = useState<OverrideState>(EMPTY_OVERRIDES);
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [fieldErrs, setFieldErrs] = useState<OverrideError[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -79,27 +77,16 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
     setFieldErrs([]);
     setConfirmDelete(false);
     setDeleteErr(null);
-    setShowAdvanced(false);
     if (existing) {
       setEnabled(existing.enabled);
-      const mult = Number(existing.size_multiplier);
-      setSizePct(
-        Number.isFinite(mult) ? String(Number((mult * 100).toFixed(2))) : "100",
-      );
-      setSizeCapUsd(existing.max_size_usd ?? "");
       setLeverageOverride(
         existing.leverage_override != null ? String(existing.leverage_override) : "",
       );
       setOverrides(overridesFromSub(existing));
     } else {
       setEnabled(true);
-      setSizePct("100");
-      setSizeCapUsd("");
       setLeverageOverride("");
-      // A fresh follow leads with the percent-of-account tier model
-      // (sizing_mode = 1) — mirrors the backend column default. Tiers stay
-      // empty (placeholders) so the user types their own %s; no defaults.
-      setOverrides({ ...EMPTY_OVERRIDES, sizingMode: "1" });
+      setOverrides(EMPTY_OVERRIDES);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caller?.caller_id, existing?.id]);
@@ -115,11 +102,6 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
   const save = async () => {
     setErr(null);
     try {
-      const pct = Number(sizePct);
-      if (!Number.isFinite(pct) || pct <= 0 || pct > 1000) {
-        throw new Error("size must be between 1 and 1000% (100 trades the caller's size)");
-      }
-      const mult = pct / 100;
       const lev = leverageOverride.trim();
       const levN = lev === "" ? null : Math.round(Number(lev));
       if (levN != null && (!Number.isFinite(levN) || levN < 1 || levN > 125)) {
@@ -128,9 +110,6 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
       const [overrideBody, errs] = overridesToBody(overrides);
       if (errs.length > 0) {
         setFieldErrs(errs);
-        // Surface the first error inline AND open the disclosure so
-        // the highlighted field is actually visible.
-        setShowAdvanced(true);
         throw new Error(errs[0]?.message ?? "Fix the highlighted fields.");
       }
       setFieldErrs([]);
@@ -138,15 +117,14 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
       const common: PatchSubBody = {
         ...overrideBody,
         enabled,
-        size_multiplier: mult.toFixed(2),
-        max_size_usd: sizeCapUsd.trim() === "" ? null : sizeCapUsd.trim(),
         leverage_override: levN,
       };
       setBusy(true);
       if (existing) {
         // PATCH: explicit nulls CLEAR blanked fields; anything this
-        // editor doesn't know about (ramp-in tier table, legacy market
-        // lists, client binding) is omitted and stays untouched.
+        // editor doesn't know about (ramp-in tier table, size cap /
+        // multiplier, margin mode, client binding) is omitted and
+        // stays untouched.
         await patchSub(existing.id, common);
       } else {
         const body: CreateSubBody = {
@@ -181,7 +159,7 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
     }
   };
 
-  const pctSizing = overrides.sizingMode === "1";
+  const usingFixed = overrides.sizeUsdOverride.trim() !== "";
   const slOn = overrides.manualSlAction !== "0";
   const filterOn = overrides.marketFilterMode !== "0";
 
@@ -243,102 +221,48 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
 
         <FormGroup title="Size">
           <Field
-            label="How to size each trade"
-            hint={
-              pctSizing
-                ? "size every trade as a share of your own account — set a % per conviction tier below"
-                : "scale or replace the dollar size the call carries"
-            }
+            label="Size per conviction (% of account)"
+            hint="the bot picks the tier from the call's conviction; a normal-conviction call uses Normal. Leave empty to follow the call's size"
           >
-            <Segmented
-              options={[
-                { value: "1", label: "% of account" },
-                { value: "0", label: "$ per call" },
-              ]}
-              value={overrides.sizingMode}
-              onChange={(v) => setOv("sizingMode", v)}
-            />
-          </Field>
-          {pctSizing ? (
-            <>
-              <Field
-                label="Size per conviction (% of account)"
-                hint="the bot picks the tier from the call's conviction; a normal-conviction call uses Medium"
-              >
-                <div className="tier-pct-row">
-                  <NumField
-                    label="Small"
-                    unit="%"
-                    value={overrides.sizeLowPercent}
-                    onChange={(t) => setOv("sizeLowPercent", t)}
-                    inputMode="numeric"
-                    placeholder="e.g. 2"
-                  />
-                  <NumField
-                    label="Medium"
-                    unit="%"
-                    value={overrides.sizeNormalPercent}
-                    onChange={(t) => setOv("sizeNormalPercent", t)}
-                    inputMode="numeric"
-                    placeholder="e.g. 5"
-                  />
-                  <NumField
-                    label="High"
-                    unit="%"
-                    value={overrides.sizeHighPercent}
-                    onChange={(t) => setOv("sizeHighPercent", t)}
-                    inputMode="numeric"
-                    placeholder="e.g. 10"
-                  />
-                </div>
-              </Field>
-              <FieldError
-                msg={
-                  errFor("sizeLowPercent") ??
-                  errFor("sizeNormalPercent") ??
-                  errFor("sizeHighPercent") ??
-                  errFor("sizingPctEquity")
-                }
-              />
-              <Field label="Account metric" hint="which balance the % is taken from">
-                <Segmented
-                  options={SIZE_BASIS.map((o) => ({
-                    value: String(o.value),
-                    label: o.label,
-                  }))}
-                  value={overrides.sizeBasis}
-                  onChange={(v) => setOv("sizeBasis", v)}
-                />
-              </Field>
-            </>
-          ) : (
-            <>
+            <div className="tier-pct-row">
               <NumField
-                label="Size"
+                label="Small"
                 unit="%"
-                value={sizePct}
-                onChange={setSizePct}
-                placeholder="100"
-                hint="share of the call's size. 100 trades exactly what the call says, 50 halves it, 200 doubles it"
+                value={overrides.sizeLowPercent}
+                onChange={(t) => setOv("sizeLowPercent", t)}
+                inputMode="numeric"
+                placeholder="e.g. 1"
               />
               <NumField
-                label="Fixed $ per trade"
-                unit="$"
-                value={overrides.sizeUsdOverride}
-                onChange={(t) => setOv("sizeUsdOverride", t)}
-                placeholder="use the call's size"
-                hint="replaces the call's dollar size entirely. Leave empty to keep the call's"
+                label="Normal"
+                unit="%"
+                value={overrides.sizeNormalPercent}
+                onChange={(t) => setOv("sizeNormalPercent", t)}
+                inputMode="numeric"
+                placeholder="e.g. 2"
               />
               <NumField
-                label="Size cap"
-                unit="$"
-                value={sizeCapUsd}
-                onChange={setSizeCapUsd}
-                placeholder="no cap"
-                hint="calls that would trade more than this are skipped entirely (not shrunk)"
+                label="High"
+                unit="%"
+                value={overrides.sizeHighPercent}
+                onChange={(t) => setOv("sizeHighPercent", t)}
+                inputMode="numeric"
+                placeholder="e.g. 5"
               />
-            </>
-          )}
+            </div>
+          </Field>
+          <NumField
+            label="Use a fixed $ per trade instead"
+            unit="$"
+            value={overrides.sizeUsdOverride}
+            onChange={(t) => setOv("sizeUsdOverride", t)}
+            placeholder="use the tiers above"
+            hint={
+              usingFixed
+                ? "every trade uses this exact dollar size — the conviction tiers above are ignored"
+                : "overrides the tiers with one flat dollar size for every trade"
+            }
+          />
         </FormGroup>
 
         <FormGroup title="Leverage">
@@ -351,32 +275,49 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
             placeholder="follow the call"
             hint="replaces the leverage the call asks for. Leave empty to use the call's"
           />
+          <NumField
+            label="Skip calls above"
+            unit="×"
+            value={overrides.maxLeverage}
+            onChange={(t) => setOv("maxLeverage", t)}
+            inputMode="numeric"
+            placeholder="never skip"
+            hint="calls asking for more leverage than this don't execute at all"
+          />
         </FormGroup>
 
-        <FormGroup title="Take-profits & stop-loss">
+        <FormGroup title="Max position">
           <NumField
-            label="Each take-profit closes"
-            unit="%"
-            value={overrides.tpClosePercent}
-            onChange={(t) => setOv("tpClosePercent", t)}
-            placeholder="33.33"
-            hint="share of the position each of the call's TP targets closes. When the call names its own per-target sizes, those win"
+            label="Shrink oversized orders to"
+            unit="$"
+            value={overrides.maxPositionUsd}
+            onChange={(t) => setOv("maxPositionUsd", t)}
+            placeholder="off"
+            hint="orders above this are shrunk to this amount and still execute — they are not skipped"
           />
+        </FormGroup>
+
+        <FormGroup title="Take-profits">
+          <p className="field-row-hint" style={{ marginTop: 0 }}>
+            Take-profits split equally across the call's targets; caller-named
+            per-target sizes win.
+          </p>
+        </FormGroup>
+
+        <FormGroup title="Stop fallback">
           <Field
             label="When a call has no stop-loss"
             hint={
               overrides.manualSlAction === "1"
                 ? "place a stop a fixed distance below the entry"
-                : overrides.manualSlAction === "2"
-                  ? "place a stop that trails the price at this distance"
-                  : "trade without a stop when the call doesn't carry one. Calls WITH a stop always use the call's stop"
+                : "trade without a stop when the call doesn't carry one. Calls WITH a stop always use the call's stop"
             }
           >
             <Segmented
-              options={MANUAL_SL_ACTION.map((o) => ({
-                value: String(o.value),
-                label: o.value === 0 ? "No stop" : o.label,
-              }))}
+              options={[
+                { value: "0", label: "No stop" },
+                { value: "1", label: "Fixed %" },
+              ]}
               value={overrides.manualSlAction}
               onChange={(v) => setOv("manualSlAction", v)}
             />
@@ -392,6 +333,28 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
                 placeholder="e.g. 10"
               />
               <FieldError msg={errFor("manualSlPct")} />
+            </>
+          )}
+        </FormGroup>
+
+        <FormGroup title="Adding to positions (DCA)">
+          <CheckField
+            label="Skip add-to-position calls"
+            checked={overrides.skipDca}
+            onChange={(v) => setOv("skipDca", v)}
+            hint="ignore the caller's DCA calls; only fresh entries execute"
+          />
+          {!overrides.skipDca && (
+            <>
+              <NumField
+                label="Add size"
+                unit="%"
+                value={overrides.dcaSizePct}
+                onChange={(t) => setOv("dcaSizePct", t)}
+                placeholder="100"
+                hint="share of the entry size each add trades. 100 adds the same amount again, 50 adds half"
+              />
+              <FieldError msg={errFor("dcaSizePct")} />
             </>
           )}
         </FormGroup>
@@ -428,156 +391,42 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
           )}
         </FormGroup>
 
-        <FormGroup title="Adding to positions (DCA)">
-          <CheckField
-            label="Skip add-to-position calls"
-            checked={overrides.skipDca}
-            onChange={(v) => setOv("skipDca", v)}
-            hint="ignore the caller's DCA calls; only fresh entries execute"
+        <FormGroup title="Safety">
+          <NumField
+            label="Max slippage"
+            unit="%"
+            value={overrides.slippagePct}
+            onChange={(t) => setOv("slippagePct", t)}
+            placeholder="0.5"
+            hint="market orders won't fill at a worse price than this"
           />
-          {!overrides.skipDca && (
-            <>
-              <NumField
-                label="Add size"
-                unit="%"
-                value={overrides.dcaSizePct}
-                onChange={(t) => setOv("dcaSizePct", t)}
-                placeholder="100"
-                hint="share of the entry size each add trades. 100 adds the same amount again, 50 adds half"
-              />
-              <FieldError msg={errFor("dcaSizePct")} />
-            </>
-          )}
+          <NumField
+            label="Drawdown pause"
+            unit="%"
+            value={overrides.drawdownStopPct}
+            onChange={(t) => setOv("drawdownStopPct", t)}
+            inputMode="numeric"
+            placeholder="off"
+            hint="pauses this follow once your account is down this much since you enrolled. Open positions stay open"
+          />
         </FormGroup>
 
-        <div style={{ gridColumn: "1 / -1" }}>
-          <button
-            type="button"
-            className="btn sm"
-            onClick={() => setShowAdvanced((s) => !s)}
+        <FormGroup title="Entry ranges">
+          <Field
+            label="When the call's entry is a price range"
+            hint="how many limit orders the range is split into: one at the midpoint, one at each edge, or edges plus the middle"
           >
-            <ChevronRight size={12} className={`chev ${showAdvanced ? "open" : ""}`} />
-            {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
-          </button>
-        </div>
-
-        {showAdvanced && (
-          <>
-            <FormGroup title="Base size">
-              {pctSizing && (
-                <>
-                  <NumField
-                    label="Flat share fallback"
-                    unit="%"
-                    value={overrides.sizingPctEquity}
-                    onChange={(t) => setOv("sizingPctEquity", t)}
-                    placeholder="off"
-                    hint="used when a call carries no conviction tag to match a tier above. Leave empty to rely on the Medium tier"
-                  />
-                  <FieldError msg={errFor("sizingPctEquity")} />
-                </>
-              )}
-              <Field
-                label="What the size counts as"
-                hint={
-                  overrides.sizeMeaning === "1"
-                    ? "the size is the margin you post; the position is size × leverage"
-                    : overrides.sizeMeaning === "2"
-                      ? "the size is the most you can lose if the stop hits; position size is derived from the stop distance"
-                      : "the size is the full position value (notional)"
-                }
-              >
-                <Segmented
-                  options={SIZE_MEANING.map((o) => ({
-                    value: String(o.value),
-                    label: o.label,
-                  }))}
-                  value={overrides.sizeMeaning}
-                  onChange={(v) => setOv("sizeMeaning", v)}
-                />
-              </Field>
-              <NumField
-                label="Shrink oversized orders to"
-                unit="$"
-                value={overrides.maxPositionUsd}
-                onChange={(t) => setOv("maxPositionUsd", t)}
-                placeholder="off"
-                hint="orders above this are shrunk to this amount instead of skipped (unlike the Size cap, which skips)"
-              />
-            </FormGroup>
-
-            <FormGroup title="Leverage limits">
-              <NumField
-                label="Skip calls above"
-                unit="×"
-                value={overrides.maxLeverage}
-                onChange={(t) => setOv("maxLeverage", t)}
-                inputMode="numeric"
-                placeholder="never skip"
-                hint="calls asking for more leverage than this don't execute at all"
-              />
-              <NumField
-                label="Lower leverage to at most"
-                unit="×"
-                value={overrides.leverageCap}
-                onChange={(t) => setOv("leverageCap", t)}
-                inputMode="numeric"
-                placeholder="never lower"
-                hint="higher leverage is lowered to this and the trade still executes"
-              />
-              <Field label="Margin mode">
-                <Segmented
-                  options={[
-                    { value: "", label: "Account default" },
-                    ...MARGIN_MODE.map((o) => ({
-                      value: String(o.value),
-                      label: o.label,
-                    })),
-                  ]}
-                  value={overrides.marginMode}
-                  onChange={(v) => setOv("marginMode", v)}
-                />
-              </Field>
-            </FormGroup>
-
-            <FormGroup title="Execution & safety">
-              <NumField
-                label="Max slippage"
-                unit="%"
-                value={overrides.slippagePct}
-                onChange={(t) => setOv("slippagePct", t)}
-                placeholder="0.5"
-                hint="market orders won't fill at a worse price than this"
-              />
-              <NumField
-                label="Drawdown pause"
-                unit="%"
-                value={overrides.drawdownStopPct}
-                onChange={(t) => setOv("drawdownStopPct", t)}
-                inputMode="numeric"
-                placeholder="off"
-                hint="pauses this follow once your account is down this much since you enrolled. Open positions stay open"
-              />
-            </FormGroup>
-
-            <FormGroup title="Entry ranges">
-              <Field
-                label="When the call's entry is a price range"
-                hint="how many limit orders the range is split into: one at the midpoint, one at each edge, or edges plus the middle"
-              >
-                <Segmented
-                  options={[
-                    { value: "0", label: "1 order (midpoint)" },
-                    { value: "1", label: "2 orders (edges)" },
-                    { value: "2", label: "3 orders" },
-                  ]}
-                  value={overrides.zoneStrategy}
-                  onChange={(v) => setOv("zoneStrategy", v)}
-                />
-              </Field>
-            </FormGroup>
-          </>
-        )}
+            <Segmented
+              options={[
+                { value: "0", label: "1 order (midpoint)" },
+                { value: "1", label: "2 orders (edges)" },
+                { value: "2", label: "3 orders" },
+              ]}
+              value={overrides.zoneStrategy}
+              onChange={(v) => setOv("zoneStrategy", v)}
+            />
+          </Field>
+        </FormGroup>
 
         {err && <div className="error-box">{err}</div>}
       </InlineEditor>
