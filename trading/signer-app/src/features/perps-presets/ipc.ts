@@ -105,6 +105,10 @@ export interface ExecSubscription {
   size_low_percent: number | null;
   size_normal_percent: number | null;
   size_high_percent: number | null;
+  // Per-user USD conviction tiers (migration 20260711150000). Decimal-as-string.
+  size_low_usd: string | null;
+  size_normal_usd: string | null;
+  size_high_usd: string | null;
   size_meaning: number;
   client_id: string | null;
   created_at: string;
@@ -143,6 +147,10 @@ export interface CreateSubBody {
   size_low_percent?: number | null;
   size_normal_percent?: number | null;
   size_high_percent?: number | null;
+  // Per-user USD conviction tiers (migration 20260711150000). Decimal-as-string.
+  size_low_usd?: string | null;
+  size_normal_usd?: string | null;
+  size_high_usd?: string | null;
   size_meaning?: number | null;
 }
 

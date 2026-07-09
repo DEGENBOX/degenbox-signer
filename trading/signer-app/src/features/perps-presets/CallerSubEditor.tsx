@@ -61,8 +61,6 @@ function FieldError({ msg }: { msg: string | undefined }) {
 }
 
 export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
-  const [enabled, setEnabled] = useState(true);
-  const [leverageOverride, setLeverageOverride] = useState("");
   const [overrides, setOverrides] = useState<OverrideState>(EMPTY_OVERRIDES);
   const [fieldErrs, setFieldErrs] = useState<OverrideError[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -77,17 +75,7 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
     setFieldErrs([]);
     setConfirmDelete(false);
     setDeleteErr(null);
-    if (existing) {
-      setEnabled(existing.enabled);
-      setLeverageOverride(
-        existing.leverage_override != null ? String(existing.leverage_override) : "",
-      );
-      setOverrides(overridesFromSub(existing));
-    } else {
-      setEnabled(true);
-      setLeverageOverride("");
-      setOverrides(EMPTY_OVERRIDES);
-    }
+    setOverrides(existing ? overridesFromSub(existing) : EMPTY_OVERRIDES);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caller?.caller_id, existing?.id]);
 
@@ -102,11 +90,6 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
   const save = async () => {
     setErr(null);
     try {
-      const lev = leverageOverride.trim();
-      const levN = lev === "" ? null : Math.round(Number(lev));
-      if (levN != null && (!Number.isFinite(levN) || levN < 1 || levN > 125)) {
-        throw new Error("leverage must be 1 to 125, or empty to follow the caller");
-      }
       const [overrideBody, errs] = overridesToBody(overrides);
       if (errs.length > 0) {
         setFieldErrs(errs);
@@ -114,11 +97,7 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
       }
       setFieldErrs([]);
 
-      const common: PatchSubBody = {
-        ...overrideBody,
-        enabled,
-        leverage_override: levN,
-      };
+      const common: PatchSubBody = { ...overrideBody };
       setBusy(true);
       if (existing) {
         // PATCH: explicit nulls CLEAR blanked fields; anything this
@@ -159,9 +138,15 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
     }
   };
 
-  const usingFixed = overrides.sizeUsdOverride.trim() !== "";
+  const pctMode = overrides.sizingMode === "1";
   const slOn = overrides.manualSlAction !== "0";
   const filterOn = overrides.marketFilterMode !== "0";
+  const sizeMeaningHint =
+    overrides.sizeMeaning === "1"
+      ? "Amount is the collateral. Position = margin × leverage."
+      : overrides.sizeMeaning === "2"
+        ? "Amount is the max loss if the stop is hit."
+        : "Amount is the full position value.";
 
   const callerDefaults = [
     caller.default_leverage != null ? `${caller.default_leverage}× leverage` : null,
@@ -214,63 +199,130 @@ export function CallerSubEditor({ onClose, onSaved, caller, existing }: Props) {
         <FormGroup title="Following">
           <CheckField
             label="Following (executes new calls automatically while on)"
-            checked={enabled}
-            onChange={setEnabled}
+            checked={overrides.enabled}
+            onChange={(v) => setOv("enabled", v)}
           />
         </FormGroup>
 
         <FormGroup title="Size">
           <Field
-            label="Size per conviction (% of account)"
-            hint="the bot picks the tier from the call's conviction; a normal-conviction call uses Normal. Leave empty to follow the call's size"
+            label="How to size"
+            hint={
+              pctMode
+                ? "each tier is a share of your account"
+                : "each tier is a fixed dollar amount per trade"
+            }
+          >
+            <Segmented
+              options={[
+                { value: "1", label: "% of account" },
+                { value: "0", label: "$ per trade" },
+              ]}
+              value={overrides.sizingMode}
+              onChange={(v) => setOv("sizingMode", v)}
+            />
+          </Field>
+
+          <Field
+            label={
+              pctMode
+                ? "Size per conviction (% of account)"
+                : "Size per conviction ($ per trade)"
+            }
+            hint="the bot picks the tier from the call's conviction; a normal-conviction call uses Normal. Empty Small / High fall back to Normal"
           >
             <div className="tier-pct-row">
-              <NumField
-                label="Small"
-                unit="%"
-                value={overrides.sizeLowPercent}
-                onChange={(t) => setOv("sizeLowPercent", t)}
-                inputMode="numeric"
-                placeholder="e.g. 1"
-              />
-              <NumField
-                label="Normal"
-                unit="%"
-                value={overrides.sizeNormalPercent}
-                onChange={(t) => setOv("sizeNormalPercent", t)}
-                inputMode="numeric"
-                placeholder="e.g. 2"
-              />
-              <NumField
-                label="High"
-                unit="%"
-                value={overrides.sizeHighPercent}
-                onChange={(t) => setOv("sizeHighPercent", t)}
-                inputMode="numeric"
-                placeholder="e.g. 5"
-              />
+              {pctMode ? (
+                <>
+                  <NumField
+                    label="Small"
+                    unit="%"
+                    value={overrides.sizeLowPercent}
+                    onChange={(t) => setOv("sizeLowPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 1"
+                  />
+                  <NumField
+                    label="Normal"
+                    unit="%"
+                    value={overrides.sizeNormalPercent}
+                    onChange={(t) => setOv("sizeNormalPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 2"
+                  />
+                  <NumField
+                    label="High"
+                    unit="%"
+                    value={overrides.sizeHighPercent}
+                    onChange={(t) => setOv("sizeHighPercent", t)}
+                    inputMode="numeric"
+                    placeholder="e.g. 5"
+                  />
+                </>
+              ) : (
+                <>
+                  <NumField
+                    label="Small"
+                    unit="$"
+                    value={overrides.sizeLowUsd}
+                    onChange={(t) => setOv("sizeLowUsd", t)}
+                    placeholder="e.g. 50"
+                  />
+                  <NumField
+                    label="Normal"
+                    unit="$"
+                    value={overrides.sizeNormalUsd}
+                    onChange={(t) => setOv("sizeNormalUsd", t)}
+                    placeholder="e.g. 100"
+                  />
+                  <NumField
+                    label="High"
+                    unit="$"
+                    value={overrides.sizeHighUsd}
+                    onChange={(t) => setOv("sizeHighUsd", t)}
+                    placeholder="e.g. 250"
+                  />
+                </>
+              )}
             </div>
           </Field>
-          <NumField
-            label="Use a fixed $ per trade instead"
-            unit="$"
-            value={overrides.sizeUsdOverride}
-            onChange={(t) => setOv("sizeUsdOverride", t)}
-            placeholder="use the tiers above"
-            hint={
-              usingFixed
-                ? "every trade uses this exact dollar size — the conviction tiers above are ignored"
-                : "overrides the tiers with one flat dollar size for every trade"
-            }
-          />
+
+          {pctMode && (
+            <Field
+              label="Account metric"
+              hint="which account balance the % is measured against"
+            >
+              <Segmented
+                options={[
+                  { value: "0", label: "Equity" },
+                  { value: "1", label: "Balance" },
+                  { value: "2", label: "Available" },
+                ]}
+                value={overrides.sizeBasis}
+                onChange={(v) => setOv("sizeBasis", v)}
+              />
+            </Field>
+          )}
+
+          <Field label="What the size means" hint={sizeMeaningHint}>
+            <Segmented
+              options={[
+                { value: "0", label: "Position size" },
+                { value: "1", label: "Margin" },
+                { value: "2", label: "SL risk" },
+              ]}
+              value={overrides.sizeMeaning}
+              onChange={(v) => setOv("sizeMeaning", v)}
+            />
+          </Field>
         </FormGroup>
 
         <FormGroup title="Leverage">
           <NumField
             label="Leverage"
             unit="×"
-            value={leverageOverride}
-            onChange={setLeverageOverride}
+            value={overrides.leverageOverride}
+            onChange={(t) => setOv("leverageOverride", t)}
             inputMode="numeric"
             placeholder="follow the call"
             hint="replaces the leverage the call asks for. Leave empty to use the call's"
