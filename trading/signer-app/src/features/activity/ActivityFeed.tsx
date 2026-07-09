@@ -28,6 +28,7 @@ import { useHlBotActivity, useSolBotActivity } from "./useBotActivity";
 import {
   hlKindLabel,
   hlLifecycle,
+  hlSourceLabel,
   solIsPaperRow,
   solLifecycle,
   solReasonLabel,
@@ -157,10 +158,10 @@ function FeedShell({
             <thead>
               <tr>
                 <th>Time</th>
+                <th>From</th>
                 <th>Action</th>
                 <th>Asset</th>
                 <th className="r">Size</th>
-                <th>From</th>
                 <th>Lifecycle</th>
                 <th>Detail</th>
               </tr>
@@ -187,6 +188,14 @@ function FeedRow({ vm }: { vm: FeedVM }) {
         {timeAgo(vm.createdAt)}
       </td>
       <td>
+        <span
+          className={`act-source ${vm.source.manual ? "manual" : ""}`}
+          title={vm.source.title}
+        >
+          {vm.source.text}
+        </span>
+      </td>
+      <td>
         <span className={`act-action ${vm.actionTone}`}>
           <Icon size={13} />
           {vm.actionLabel}
@@ -209,14 +218,6 @@ function FeedRow({ vm }: { vm: FeedVM }) {
       <td className="r act-size">
         {vm.size}
         {vm.lev && <span className="act-lev">{vm.lev}</span>}
-      </td>
-      <td>
-        <span
-          className={`act-source ${vm.source.manual ? "manual" : ""}`}
-          title={vm.source.title}
-        >
-          {vm.source.text}
-        </span>
       </td>
       <td>
         <span className="act-life">
@@ -297,7 +298,6 @@ function hlToVM(row: HlActivityRow): FeedVM {
   const size = row.size_usd != null ? Number(row.size_usd) : null;
   const filled = row.filled_size_usd != null ? Number(row.filled_size_usd) : null;
   const pnl = row.closed_pnl != null ? Number(row.closed_pnl) : null;
-  const caller = row.caller_name ?? row.caller_id ?? null;
 
   let detail: React.ReactNode = <span className="act-dim">—</span>;
   if (row.err_msg) {
@@ -326,11 +326,7 @@ function hlToVM(row: HlActivityRow): FeedVM {
     asset: row.coin ? splitMarket(row.coin) : null,
     size: size != null ? fmtUsd(String(size)) : "—",
     lev: row.leverage ? `${row.leverage}×` : null,
-    source: caller
-      ? { text: caller, manual: false, title: row.signal_id ? `signal ${row.signal_id}` : undefined }
-      : row.target_wallet
-        ? { text: `copy ${shortAddr(row.target_wallet, 4, 4)}`, manual: false, title: "copy-trade follow" }
-        : { text: "manual", manual: true },
+    source: hlSourceLabel(row),
     stage,
     detail,
   };

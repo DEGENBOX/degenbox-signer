@@ -12,6 +12,8 @@
 // These row shapes mirror the Rust `BotActivityRow`s; Decimals arrive as
 // numeric strings — coerce with Number() at render.
 
+import { shortAddr } from "../../components/ui";
+
 export type Tone = "good" | "warn" | "bad" | "info" | "muted";
 
 // ─── Perpetuals rows (hyperliquid/exchange/api.rs BotActivityRow) ──
@@ -33,6 +35,11 @@ export type HlBotKind =
   | "leverage"
   | "other";
 
+/** Instruction ORIGIN as classified by the gateway (api.rs BotActivityRow
+ *  `source`): `caller` = auto-exec from a subscribed caller, `copy` =
+ *  copy-trade follow, `manual` = FE-initiated. */
+export type HlActivitySource = "caller" | "copy" | "manual";
+
 export interface HlActivityRow {
   cloid: string;
   kind: HlBotKind;
@@ -50,7 +57,15 @@ export interface HlActivityRow {
   signal_id: string | null;
   caller_id: string | null;
   caller_name: string | null;
+  /** The account this instruction EXECUTES on — the user's OWN verified
+   *  wallet. Post-H8 it is ALWAYS set, so it does NOT identify a copy
+   *  follow; never render it as "copy <wallet>". Use `source` for origin
+   *  and `copy_leader_wallet` for the trader being mirrored. */
   target_wallet: string | null;
+  /** Instruction origin discriminator (gateway-derived). */
+  source: HlActivitySource | string;
+  /** For `source = "copy"`, the LEADER wallet being mirrored. NULL else. */
+  copy_leader_wallet: string | null;
   created_at: string;
   delivered_at: string | null;
   acked_at: string | null;
@@ -205,6 +220,40 @@ export function solReasonLabel(reason?: string | null): string {
   if (r.includes("no open copied position")) return "Nothing to sell";
   if (r.includes("zero")) return "Sized to zero";
   return reason.replace(/[_:]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/** FROM-column view-model for an HL row. Mirrors the Solana
+ *  `solSourceLabel` convention: caller name when the order came from a
+ *  subscribed caller; the mirrored LEADER wallet for a genuine copy-trade;
+ *  a neutral "manual" otherwise. NEVER labels the user's own
+ *  `target_wallet` as a copy — that was the misleading "copy <own wallet>"
+ *  bug this replaces. */
+export function hlSourceLabel(row: HlActivityRow): {
+  text: string;
+  manual: boolean;
+  title?: string;
+} {
+  // Caller origin: display name, then caller_id, as the fallback. When the
+  // gateway classified this as a caller but the caller-name join was empty,
+  // still show the id rather than mislabelling it as copy/manual.
+  const caller = row.caller_name ?? row.caller_id ?? null;
+  if (row.source === "caller" || (row.source !== "copy" && caller)) {
+    return {
+      text: caller ?? "caller",
+      manual: false,
+      title: row.signal_id ? `signal ${row.signal_id}` : "caller signal",
+    };
+  }
+  if (row.source === "copy") {
+    return row.copy_leader_wallet
+      ? {
+          text: `copy ${shortAddr(row.copy_leader_wallet, 4, 4)}`,
+          manual: false,
+          title: "copy-trade follow — mirroring this leader wallet",
+        }
+      : { text: "copy-follow", manual: false, title: "copy-trade follow" };
+  }
+  return { text: "manual", manual: true, title: "manual order" };
 }
 
 export function solSourceLabel(row: SolActivityRow): string {
