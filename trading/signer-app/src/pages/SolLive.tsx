@@ -11,7 +11,6 @@ import { useEffect, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import type {
   BotPreset,
-  SolCopyConfigFull,
   SolRuntimeStatus,
   StatusReport,
 } from "../ipc";
@@ -83,7 +82,6 @@ export function SolLive({
   // Running-now strip data (R4): the same sessions/follows/armed truth
   // the Bots tab polls, folded into this tab's existing 10 s cadence.
   const [botSessions, setBotSessions] = useState<BotPreset[] | null>(null);
-  const [follows, setFollows] = useState<SolCopyConfigFull[] | null>(null);
   const [armedIds, setArmedIds] = useState<Set<string> | null>(null);
   const gateway = useGatewayLink();
   const lastSignAt = useLastSignAt("sol");
@@ -91,16 +89,14 @@ export function SolLive({
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const [rt, se, fo, dev] = await Promise.allSettled([
+      const [rt, se, dev] = await Promise.allSettled([
         ipc.solRuntimeStatus(),
         ipc.botPresets(),
-        ipc.solCopyConfigsFull(),
         ipc.botDeviceStatus(),
       ]);
       if (!alive) return;
       if (rt.status === "fulfilled") setRuntime(rt.value);
       if (se.status === "fulfilled") setBotSessions(se.value);
-      if (fo.status === "fulfilled") setFollows(fo.value);
       if (dev.status === "fulfilled") {
         setArmedIds(new Set(dev.value.armed_session_ids));
       }
@@ -137,7 +133,7 @@ export function SolLive({
     ),
   ];
 
-  const run = summarizeRunning(botSessions, follows, armedIds);
+  const run = summarizeRunning(botSessions, armedIds);
 
   return (
     <>
@@ -148,7 +144,7 @@ export function SolLive({
         type="button"
         className="run-strip"
         onClick={onGoBots}
-        title={run.title || "Nothing is live. Set up auto-buy or copy trade on the Bots tab"}
+        title={run.title || "Nothing is live. Set up auto-buy on the Bots tab"}
       >
         <span
           className={`status-dot ${run.dot === "grey" ? "" : run.dot} ${

@@ -1,5 +1,5 @@
 //! Solana execution runtime — makes the Tauri app a full Solana
-//! executor, the same way `signer-cli watch-sells` + `watch-copy` are.
+//! executor, the same way `signer-cli watch-sells` is.
 //!
 //! Multi-client topology: ONE dispatcher task per device consuming the
 //! two user-scoped streams ONCE, fanned out to N per-wallet
@@ -8,7 +8,6 @@
 //! ```text
 //! unlock → resolve gateway auth → /auth/me (user uuid)
 //!        → spawn_sell_subscriber   (trading.sell.needed.{user})  1 WS
-//!        → spawn_copy_subscriber   (trading.copy.exec.{user})    1 WS
 //!        → spawn_intent_subscriber (trading.intent.{user})       1 WS
 //!        → select! loop
 //!            → route event by `wallet_pubkey`
@@ -20,22 +19,21 @@
 //!
 //! The single consumption point is the double-execution guarantee: an
 //! event is received once and routed to at most one engine — N engines
-//! never share a subject subscription. (3 websockets per device total,
+//! never share a subject subscription. (2 websockets per device total,
 //! independent of wallet count.) Manual intents (`trading.intent`) carry
 //! no wallet stamp, so they route to the PRIMARY engine and reuse the
 //! EXISTING `trading_intents` row (submit-to-existing, never a second).
 //!
+//! Solana copy-trade (mirroring a leader wallet via `trading.copy.exec`)
+//! was removed — that venue is speed-critical and served by native bots
+//! elsewhere. Scanner preset auto-buys, manual dashboard intents and
+//! TP/SL sells stay.
+//!
 //! Differences from the CLI, all host-shape:
 //!
-//! - **Copy budgets are per-config, server-side (v0.3.0 slice 8).**
-//!   The former per-unlock `SolConfig.copy_session_sol` gate is
-//!   retired: the gateway enforces each config's `copy_budget_lamports`
-//!   at emit (refuses at ≤ 0 headroom, slice 6) and forwards the
-//!   remaining headroom folded into `max_spend_lamports`, which
-//!   [`resolve_buy_lamports`] clamps every buy to. The engines'
-//!   `BudgetState` stays as a plain spend LEDGER (unlimited caps) so
-//!   the Status page still shows per-session spend. Sells (TP/SL +
-//!   mirror) only dispose of tokens and were never budget-gated —
+//! - The engines' `BudgetState` stays as a plain spend LEDGER (unlimited
+//!   caps) so the Status page still shows per-session spend. Sells
+//!   (TP/SL) only dispose of tokens and were never budget-gated —
 //!   exactly like `watch-sells`.
 //! - Starts only after keystore unlock; stops via a watch channel on
 //!   lock/quit — in-flight event handling completes before the loop
@@ -49,11 +47,11 @@ use crate::sol::gateway::{self, GatewayAuth};
 use crate::state::{AppState, ClientRole, RecentSign};
 use chrono::Utc;
 use degenbox_signer_core::{
-    bot_engine::Decision, default_allowlist, resolve_buy_lamports, spawn_copy_subscriber_with,
-    spawn_intent_subscriber_with, spawn_sell_subscriber_with, wallet_event_is_mine, BotConfig,
-    BotEngine, BudgetConfig, BudgetState, CopyExecEvent, JupiterClient, Keypair, ManualIntentEvent,
-    PresetMatcher, RelayClient, RelayError, RpcClient, SellNeededEvent, Signer as _, StreamAuth,
-    StreamHealth, StreamHealthSink, TokenProvider, TriggerKind, WalletChain,
+    bot_engine::Decision, default_allowlist, spawn_intent_subscriber_with,
+    spawn_sell_subscriber_with, wallet_event_is_mine, BotConfig, BotEngine, BudgetConfig,
+    BudgetState, JupiterClient, Keypair, ManualIntentEvent, PresetMatcher, RelayClient, RelayError,
+    RpcClient, SellNeededEvent, Signer as _, StreamAuth, StreamHealth, StreamHealthSink,
+    TokenProvider, TriggerKind, WalletChain,
 };
 use serde::Serialize;
 use solana_sdk::signature::SeedDerivable;
@@ -511,17 +509,14 @@ async fn run(
         })
     };
 
-    // 3. Subscribe to both user-scoped streams ONCE for the whole
-    //    fleet (2 websockets total). The subscribers own their
-    //    reconnect loops; dropping the receivers stops them. The single
-    //    consumption point is the double-execution guarantee — events
-    //    are fanned out by wallet below, never re-consumed.
+    // 3. Subscribe to the user-scoped streams ONCE for the whole
+    //    fleet. The subscribers own their reconnect loops; dropping the
+    //    receivers stops them. The single consumption point is the
+    //    double-execution guarantee — events are fanned out by wallet
+    //    below, never re-consumed.
     let mut sell_rx = spawn_sell_subscriber_with(provider.clone(), user_id, Some(health.clone()))
         .await
         .map_err(|e| format!("sell stream subscribe: {e}"))?;
-    let mut copy_rx = spawn_copy_subscriber_with(provider.clone(), user_id, Some(health.clone()))
-        .await
-        .map_err(|e| format!("copy stream subscribe: {e}"))?;
     // Manual dashboard buys/sells: the web app pre-creates a
     // `trading_intents` row (`POST /api/trading/intents`) then relies on
     // a gateway-connected signer to fill it. We submit to that EXISTING
@@ -592,7 +587,7 @@ async fn run(
         uses_proxy_default,
         engines = slots.len(),
         wallets = ?slots.iter().map(|s| short(&s.wallet)).collect::<Vec<_>>(),
-        "sol runtime ready (sell + copy streams live, per-wallet engines)"
+        "sol runtime ready (sell stream live, per-wallet engines)"
     );
 
     // Maintenance tick: proactively renew the desktop-login JWT well
@@ -669,41 +664,6 @@ async fn run(
                     Dispatch::NoEngine => {
                         tracing::warn!(mint = %short(&evt.mint), wallet = ?evt.wallet_pubkey,
                             "sell trigger stamped for a wallet not in this vault — ignored");
-                    }
-                }
-            }
-            evt = copy_rx.recv() => {
-                let Some(evt) = evt else {
-                    return Err("copy stream ended — relock/unlock to restart".into());
-                };
-                if refresh_relay(&state, &mut relay, &mut relay_auth).await && uses_proxy_default {
-                    rotate_proxy_rpc(&mut rpc, &mut engines, &relay_auth);
-                }
-                match pick_engine(&slots_view(slots), evt.wallet_pubkey.as_deref()) {
-                    Dispatch::Run(i) => {
-                        let slot = &slots[i];
-                        handle_copy(
-                            &state,
-                            &slot.rt,
-                            &mut engines[i],
-                            &jup,
-                            &relay,
-                            &rpc,
-                            slot.kp.as_ref(),
-                            evt,
-                        )
-                        .await;
-                    }
-                    Dispatch::Paused(i) => {
-                        let slot = &slots[i];
-                        tracing::info!(mint = %short(&evt.mint), side = %evt.side, wallet = %short(&slot.wallet),
-                            "copy event skipped — client paused");
-                        push(&state, if evt.side == "sell" { "copy sell" } else { "copy buy" }, &evt.mint, "skipped (paused)");
-                        mark_event(&slot.rt, false, evt.side == "sell");
-                    }
-                    Dispatch::NoEngine => {
-                        tracing::warn!(mint = %short(&evt.mint), wallet = ?evt.wallet_pubkey,
-                            "copy event stamped for a wallet not in this vault — ignored");
                     }
                 }
             }
@@ -987,155 +947,6 @@ async fn handle_sell(
     }
 }
 
-/// Copy-trade execution command — port of `watch_copy_cmd`'s event body.
-#[allow(clippy::too_many_arguments)]
-async fn handle_copy(
-    state: &AppState,
-    rt: &SharedSolRuntime,
-    engine: &mut BotEngine,
-    jup: &JupiterClient,
-    relay: &RelayClient,
-    rpc: &RpcClient,
-    kp: &Keypair,
-    evt: CopyExecEvent,
-) {
-    // Tag every intent this event produces with its copy config so the
-    // gateway can auto-arm the ladder on fill + enforce the position cap.
-    engine.set_copy_config_id(Some(evt.config_id.to_string()));
-    let slippage = u16::try_from(evt.slippage_bps.clamp(1, 10_000)).unwrap_or(100);
-    match evt.side.as_str() {
-        "buy" => {
-            // Resolve size: fixed mode arrives pre-sized; pct mode
-            // resolves against the live balance denominator — the
-            // 4-asset cash basis (SOL + wSOL + USDC + USDT, D8) when
-            // the event carries a SOL spot, else the bare SOL balance.
-            // FAIL-CLOSED: any balance read error skips the buy.
-            let balance = if evt.sizing_mode == 1 {
-                match fetch_balance_denominator(rpc, kp, evt.sol_price_usd).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(mint = %short(&evt.mint), error = %e,
-                            "copy buy skipped — balance denominator fetch failed");
-                        push(state, "copy buy", &evt.mint, "failed");
-                        mark_event(rt, false, false);
-                        engine.set_copy_config_id(None);
-                        return;
-                    }
-                }
-            } else {
-                0
-            };
-            let lamports = match resolve_buy_lamports(&evt, balance) {
-                Ok(l) => l,
-                Err(reason) => {
-                    tracing::info!(mint = %short(&evt.mint), %reason, "copy buy skipped");
-                    push(state, "copy buy", &evt.mint, "skipped");
-                    mark_event(rt, false, false);
-                    engine.set_copy_config_id(None);
-                    return;
-                }
-            };
-            tracing::info!(mint = %short(&evt.mint), sol = lamports as f64 / 1e9,
-                wallet = %short(&evt.wallet_address), "copy buy executing");
-            match engine
-                .execute_buy(
-                    evt.intent_id.to_string(),
-                    evt.mint.clone(),
-                    lamports,
-                    Some(slippage),
-                    evt.amm_address.clone(),
-                    jup,
-                    relay,
-                    rpc,
-                    kp,
-                )
-                .await
-            {
-                Ok(Decision::Submitted(_)) => {
-                    push(state, "copy buy", &evt.mint, "submitted");
-                    mark_event(rt, true, false);
-                    restore_ready_after_success(rt);
-                }
-                Ok(Decision::Skipped(r)) => {
-                    tracing::info!(mint = %short(&evt.mint), reason = %r, "copy buy skipped");
-                    push(state, "copy buy", &evt.mint, "skipped");
-                    mark_event(rt, false, false);
-                }
-                Err(e) => {
-                    tracing::warn!(mint = %short(&evt.mint), error = %e, "copy buy failed");
-                    push(state, "copy buy", &evt.mint, "failed");
-                    rt.update(|s| s.error = Some(format!("copy buy {}: {e}", short(&evt.mint))));
-                    mark_event(rt, false, false);
-                    flag_auth_expired_if_401(rt, &e.to_string());
-                }
-            }
-            // Track client-side spend for the Status page (pure
-            // ledger since slice 8 — no cap semantics).
-            let spent = engine.stats().budget_spent_lamports as f64 / 1e9;
-            rt.update(|s| s.copy_spent_sol = spent);
-        }
-        "sell" => {
-            let Some(raw) = evt.token_amount_raw.as_deref() else {
-                tracing::warn!(mint = %short(&evt.mint), "mirror sell without amount — skipped");
-                push(state, "copy sell", &evt.mint, "skipped");
-                mark_event(rt, false, true);
-                engine.set_copy_config_id(None);
-                return;
-            };
-            let token_amount: u64 = match raw.parse() {
-                Ok(n) => n,
-                Err(_) => {
-                    tracing::warn!(mint = %short(&evt.mint), raw,
-                        "mirror sell amount not parseable as u64 — skipped");
-                    push(state, "copy sell", &evt.mint, "skipped");
-                    mark_event(rt, false, true);
-                    engine.set_copy_config_id(None);
-                    return;
-                }
-            };
-            tracing::info!(mint = %short(&evt.mint), amount = token_amount,
-                wallet = %short(&evt.wallet_address), "mirror sell executing");
-            match engine
-                .execute_sell_with_dedupe(
-                    Some(evt.intent_id.to_string()),
-                    evt.mint.clone(),
-                    token_amount,
-                    evt.amm_address.clone(),
-                    jup,
-                    relay,
-                    rpc,
-                    kp,
-                )
-                .await
-            {
-                Ok(Decision::Submitted(_)) => {
-                    push(state, "copy sell", &evt.mint, "submitted");
-                    mark_event(rt, true, true);
-                    restore_ready_after_success(rt);
-                }
-                Ok(Decision::Skipped(r)) => {
-                    tracing::info!(mint = %short(&evt.mint), reason = %r, "mirror sell skipped");
-                    push(state, "copy sell", &evt.mint, "skipped");
-                    mark_event(rt, false, true);
-                }
-                Err(e) => {
-                    tracing::warn!(mint = %short(&evt.mint), error = %e, "mirror sell failed");
-                    push(state, "copy sell", &evt.mint, "failed");
-                    rt.update(|s| s.error = Some(format!("copy sell {}: {e}", short(&evt.mint))));
-                    mark_event(rt, false, true);
-                    flag_auth_expired_if_401(rt, &e.to_string());
-                }
-            }
-        }
-        other => {
-            tracing::warn!(side = %other, mint = %short(&evt.mint), "unknown copy event side");
-            push(state, "copy ?", &evt.mint, "skipped");
-            mark_event(rt, false, false);
-        }
-    }
-    engine.set_copy_config_id(None);
-}
-
 /// WSOL mint — the fixed SOL leg of every dashboard buy/sell.
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
@@ -1307,46 +1118,6 @@ async fn handle_manual(
             }
         }
     }
-}
-
-/// Resolve the pct-of-balance denominator for a copy buy (slice 8).
-///
-/// With a SOL spot on the event: the 4-asset cash basis — native SOL +
-/// wSOL + USDC + USDT ATA balances, valued in lamport equivalents via
-/// [`degenbox_signer_core::cash_denominator_lamports`]. A missing ATA
-/// is a genuine zero; any RPC ERROR aborts (fail-closed — the caller
-/// skips the buy rather than sizing against a half-read denominator).
-/// Without a spot (legacy gateway / no price available): the bare SOL
-/// balance, exactly the pre-slice-8 behavior.
-async fn fetch_balance_denominator(
-    rpc: &RpcClient,
-    kp: &Keypair,
-    sol_price_usd: Option<f64>,
-) -> Result<u64, String> {
-    use degenbox_signer_core::dex::ata;
-    let owner = kp.pubkey();
-    let sol = rpc
-        .get_balance(&owner)
-        .await
-        .map_err(|e| format!("SOL balance: {e}"))?;
-    let Some(price) = sol_price_usd.filter(|p| p.is_finite() && *p > 0.0) else {
-        return Ok(sol);
-    };
-    let mut raws = [0u64; 3];
-    for (i, mint) in [ata::WSOL_MINT, ata::USDC_MINT, ata::USDT_MINT]
-        .iter()
-        .enumerate()
-    {
-        // All three cash mints live under the legacy token program.
-        let account = ata::derive(&owner, mint);
-        raws[i] = rpc
-            .get_token_account_balance(&account)
-            .await
-            .map_err(|e| format!("cash ATA balance ({mint}): {e}"))?
-            .unwrap_or(0);
-    }
-    degenbox_signer_core::cash_denominator_lamports(sol, raws[0], raws[1], raws[2], price)
-        .ok_or_else(|| "cash denominator rejected the SOL spot".into())
 }
 
 #[cfg(test)]

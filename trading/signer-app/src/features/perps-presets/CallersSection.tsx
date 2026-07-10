@@ -16,7 +16,7 @@ import { Pencil, Plus, Radio, X } from "lucide-react";
 import { timeAgo } from "@degenbox/ui";
 import { Collapsible } from "../../components/Collapsible";
 import { EmptyState, Kpi, SkeletonRows, Switch } from "../../components/ui";
-import { RowWithEditor } from "../presets/CopyTradeSection";
+import { RowWithEditor } from "../presets/RowWithEditor";
 import {
   fetchCallers,
   fetchInstructions,

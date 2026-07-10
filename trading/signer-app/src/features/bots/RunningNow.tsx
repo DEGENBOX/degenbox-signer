@@ -1,22 +1,18 @@
 // Running now — the first thing on the Solana BOTS tab (operator R4:
-// "I can't tell which presets and copy wallets are actually live").
-// One compact row per LIVE thing: every enabled auto-buy session
-// (preset, wallet, spent/budget, fills, armed-here vs server-only) and
-// every enabled copy follow (leader, sizing, exit style, feed health).
-// Each row has a status dot and a Manage jump to where it's edited;
-// everything below this section is configuration.
+// "I can't tell which presets are actually live"). One compact row per
+// LIVE thing: every enabled auto-buy session (preset, wallet,
+// spent/budget, fills, armed-here vs server-only). Each row has a
+// status dot and a Manage jump to where it's edited; everything below
+// this section is configuration.
 
 import { Moon, Zap } from "lucide-react";
 import { StatusPill, fmtSol, shortAddr } from "@degenbox/ui";
-import { EmptyState, timeAgo } from "../../components/ui";
-import type { CopytradeConfig, SolCopyConfigFull } from "../../ipc";
+import { EmptyState } from "../../components/ui";
 import type { BotDeviceStatus, BotPreset, ClientInfo } from "./ipc";
 import { fmtIn } from "./meta";
-import { sellSummary, sizingSummary } from "../presets/ipc";
 
 /** Anchor ids the Manage buttons jump to (set in SolBotsTab/ClientCard). */
 export const WALLETS_ANCHOR = "sol-wallets";
-export const COPY_ANCHOR = "sol-copytrade";
 export const walletAnchor = (address: string) => `sol-wallet-${address}`;
 
 /** Fired before a wallet jump so the Bots accordion can expand the
@@ -26,8 +22,8 @@ export const WALLET_JUMP_EVENT = "dbx:wallet-jump";
 
 /** Fired when a Manage jump needs the parent tab to switch its config
  * sub-nav to the section that owns `anchor` (R5 sub-nav). Detail =
- * `{ sub: "wallets" | "copy", anchor }`. The parent switches the sub-tab
- * and — after the target section has mounted — scrolls to `anchor`, so the
+ * `{ sub: "wallets", anchor }`. The parent switches the sub-tab and —
+ * after the target section has mounted — scrolls to `anchor`, so the
  * jump works even when that section was on an inactive sub-tab. */
 export const BOTS_SUBTAB_EVENT = "dbx:bots-subtab";
 
@@ -40,9 +36,8 @@ function jumpTo(id: string, walletAddress?: string | null) {
   // Tell the parent which config sub-tab owns this anchor. The parent
   // switches to it and does the scroll AFTER the section mounts (a bare
   // rAF-scroll here would race React's commit and land on nothing).
-  const sub = id === COPY_ANCHOR ? "copy" : "wallets";
   window.dispatchEvent(
-    new CustomEvent(BOTS_SUBTAB_EVENT, { detail: { sub, anchor: id } }),
+    new CustomEvent(BOTS_SUBTAB_EVENT, { detail: { sub: "wallets", anchor: id } }),
   );
 }
 
@@ -50,19 +45,14 @@ export function RunningNow({
   sessions,
   clients,
   device,
-  copyRows,
-  copyStats,
 }: {
   sessions: BotPreset[] | null;
   clients: ClientInfo[] | null;
   device: BotDeviceStatus | null;
-  copyRows: SolCopyConfigFull[] | null;
-  copyStats: CopytradeConfig[] | null;
 }) {
-  const loading = sessions === null && copyRows === null;
+  const loading = sessions === null;
   const armedIds = new Set(device?.armed_session_ids ?? []);
   const live = (sessions ?? []).filter((s) => s.enabled);
-  const follows = (copyRows ?? []).filter((c) => c.enabled);
 
   const walletName = (pubkey: string | null): string => {
     if (!pubkey) return "unknown wallet";
@@ -77,11 +67,11 @@ export function RunningNow({
           <span className="skeleton" style={{ width: "55%" }} />
           <span className="skeleton" style={{ width: "40%" }} />
         </div>
-      ) : live.length + follows.length === 0 ? (
+      ) : live.length === 0 ? (
         <EmptyState
           icon={<Moon size={18} />}
           title="Nothing is running right now"
-          hint="start a session on a wallet below, or switch on a leader follow under Copy trade"
+          hint="start a session on a wallet below"
         />
       ) : (
         <>
@@ -152,46 +142,6 @@ export function RunningNow({
                         knownWallet ? s.wallet_pubkey : null,
                       )
                     }
-                  >
-                    Manage
-                  </button>
-                </div>
-              );
-            })}
-            {follows.map((c) => {
-              const st =
-                copyStats?.find((x) => x.id === c.id && x.venue === "solana") ?? null;
-              const statLine = st
-                ? st.last_copy_at
-                  ? `${st.copied_24h} cop${st.copied_24h === 1 ? "y" : "ies"} 24h · last ${timeAgo(st.last_copy_at)}`
-                  : "no copies yet"
-                : null;
-              return (
-                <div className="run-row" key={c.id}>
-                  <span
-                    className={`status-dot ${c.wallet_copy_mode ? "green pulse" : "amber"}`}
-                  />
-                  <span className="run-kind hud-label">copy</span>
-                  <span className="run-main">
-                    <strong>{c.label}</strong>
-                    <span className="run-sub" title={c.leader}>
-                      {shortAddr(c.leader, 6, 6)} · {sizingSummary(c)} ·{" "}
-                      {sellSummary(c)}
-                    </span>
-                  </span>
-                  {statLine && <span className="run-meta mono">{statLine}</span>}
-                  {!c.wallet_copy_mode && (
-                    <StatusPill
-                      tone="warn"
-                      title="This wallet's copy feed is off, so nothing gets mirrored. Open its settings under Copy trade and save to fix it."
-                    >
-                      feed off
-                    </StatusPill>
-                  )}
-                  <button
-                    className="btn xs"
-                    title="Jump to Copy trade below (settings, stop following)"
-                    onClick={() => jumpTo(COPY_ANCHOR)}
                   >
                     Manage
                   </button>

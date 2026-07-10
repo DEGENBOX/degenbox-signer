@@ -13,21 +13,17 @@ import { Bots } from "./Bots";
 import { useFleet } from "../features/bots/useFleet";
 import {
   BOTS_SUBTAB_EVENT,
-  COPY_ANCHOR,
   RunningNow,
   WALLETS_ANCHOR,
 } from "../features/bots/RunningNow";
-import { useCopyTrade } from "../features/presets/useCopyTrade";
 import { ScannerPresetsSection } from "../features/presets/ScannerPresetsSection";
-import { CopyTradeSection } from "../features/presets/CopyTradeSection";
 import { SolExecutionSettings } from "../features/bots/SolExecutionSettings";
 import type { StatusReport } from "../ipc";
 
-type Sub = "wallets" | "presets" | "copy" | "settings";
+type Sub = "wallets" | "presets" | "settings";
 
 export function SolBotsTab({ status }: { status: StatusReport | null }) {
   const fleet = useFleet();
-  const copy = useCopyTrade();
   const [sub, setSub] = useState<Sub>("wallets");
   // Anchor to scroll to once the target sub-tab's section has mounted.
   const pendingScroll = useRef<string | null>(null);
@@ -56,10 +52,9 @@ export function SolBotsTab({ status }: { status: StatusReport | null }) {
   }, [sub]);
 
   const liveCount =
-    fleet.sessions === null && copy.rows === null
+    fleet.sessions === null
       ? "…"
-      : (fleet.sessions ?? []).filter((s) => s.enabled).length +
-        (copy.rows ?? []).filter((c) => c.enabled).length;
+      : (fleet.sessions ?? []).filter((s) => s.enabled).length;
 
   return (
     <>
@@ -69,8 +64,6 @@ export function SolBotsTab({ status }: { status: StatusReport | null }) {
           sessions={fleet.sessions}
           clients={fleet.clients}
           device={fleet.device}
-          copyRows={copy.rows}
-          copyStats={copy.stats}
         />
       </ShellSection>
 
@@ -84,7 +77,6 @@ export function SolBotsTab({ status }: { status: StatusReport | null }) {
               label: `Wallets${fleet.clients ? ` · ${fleet.clients.length}` : ""}`,
             },
             { value: "presets", label: "Presets" },
-            { value: "copy", label: "Copy trade" },
             { value: "settings", label: "Settings" },
           ]}
         />
@@ -105,13 +97,8 @@ export function SolBotsTab({ status }: { status: StatusReport | null }) {
           <ScannerPresetsSection />
         </ShellSection>
       )}
-      {sub === "copy" && (
-        <ShellSection num="04" title="Copy trade" id={COPY_ANCHOR}>
-          <CopyTradeSection copy={copy} />
-        </ShellSection>
-      )}
       {sub === "settings" && (
-        <ShellSection num="05" title="Execution">
+        <ShellSection num="04" title="Execution">
           <SolExecutionSettings />
         </ShellSection>
       )}

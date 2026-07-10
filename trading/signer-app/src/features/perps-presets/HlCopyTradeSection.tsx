@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pencil, Plus, UserPlus, X } from "lucide-react";
 import { fmtUsd, shortAddr, timeAgo } from "@degenbox/ui";
 import { EmptyState, Kpi, SkeletonRows, Switch } from "../../components/ui";
-import { RowWithEditor } from "../presets/CopyTradeSection";
+import { RowWithEditor } from "../presets/RowWithEditor";
 import {
   fetchHlCopySummary,
   followHlConfig,
