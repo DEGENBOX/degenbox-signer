@@ -47,6 +47,7 @@ pub mod copy_stream;
 pub mod dex;
 pub mod fee_strategy;
 pub mod hl;
+pub mod intent_stream;
 pub mod jupiter;
 pub mod keystore;
 #[cfg(feature = "localhost-daemon")]
@@ -93,6 +94,9 @@ pub use copy_stream::{
 };
 pub use fee_strategy::{
     spawn_priority_fee_poller, DexId, FeeParams, FeeStrategy, FeeTier, Side as TradeSide,
+};
+pub use intent_stream::{
+    spawn_intent_subscriber, spawn_intent_subscriber_with, IntentStreamError, ManualIntentEvent,
 };
 pub use jupiter::{JupiterClient, JupiterError, QuoteResponse, SwapOptions, SwapResponse};
 pub use keystore::{

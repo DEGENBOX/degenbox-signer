@@ -10,11 +10,17 @@ import { FileText, RefreshCw } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { ipc } from "../../ipc";
+import { Switch } from "../../components/ui";
+import { getSkipCloseConfirm, setSkipCloseConfirm } from "../../lib/prefs";
 
 export function AppSection() {
   const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // "Confirm before closing" — inverse of the dbx.skipCloseConfirm pref.
+  // This is the re-enable path once the operator has ticked "Don't ask
+  // again" in a close dialog (which then hides the dialog entirely).
+  const [confirmClose, setConfirmClose] = useState(() => !getSkipCloseConfirm());
 
   useEffect(() => {
     ipc.appVersion().then(setVersion).catch(() => {});
@@ -48,6 +54,26 @@ export function AppSection() {
       <div className="row">
         <span className="label">Updates</span>
         <span className="value">Manual in this build. Use the button below to check.</span>
+      </div>
+      <div className="row">
+        <span className="label">Confirm before closing</span>
+        <span className="value" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Switch
+            on={confirmClose}
+            title={
+              confirmClose
+                ? "Ask for confirmation before closing/selling a position"
+                : "Positions close directly with no confirmation (Perps + Solana)"
+            }
+            onToggle={(next) => {
+              setConfirmClose(next);
+              setSkipCloseConfirm(!next);
+            }}
+          />
+          <span style={{ color: "var(--fg-faint)", fontSize: 12 }}>
+            {confirmClose ? "on" : "off — one-click closes"}
+          </span>
+        </span>
       </div>
       {msg && <p style={{ marginTop: 10, marginBottom: 0 }}>{msg}</p>}
       <div className="btn-row">

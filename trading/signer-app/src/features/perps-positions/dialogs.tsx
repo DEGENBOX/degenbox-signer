@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { ipc, type HlPosition } from "../../ipc";
 import { Modal, Pnl } from "../../components/ui";
+import { getSkipCloseConfirm, setSkipCloseConfirm } from "../../lib/prefs";
 
 // ─── Close / reduce dialog (type-to-confirm) ────────────────────────
 
@@ -33,6 +34,9 @@ export function ClosePositionDialog({
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // "Don't ask again" — governs BOTH venues' close flows via localStorage.
+  // Persisted the moment it's toggled (so cancelling still keeps the choice).
+  const [skip, setSkip] = useState(() => getSkipCloseConfirm());
 
   useEffect(() => {
     if (position) {
@@ -40,6 +44,7 @@ export function ClosePositionDialog({
       setTyped("");
       setErr(null);
       setBusy(false);
+      setSkip(getSkipCloseConfirm());
     }
   }, [position, initialPercent]);
 
@@ -47,9 +52,11 @@ export function ClosePositionDialog({
   const coin = position.coin;
   const pctNum = Number(percent);
   const pctValid = Number.isFinite(pctNum) && pctNum > 0 && pctNum <= 100;
+  // When skip is set the type-to-confirm gate is bypassed.
+  const gateOk = skip || typed === coin;
 
   const run = async () => {
-    if (!pctValid || typed !== coin) return;
+    if (!pctValid || !gateOk) return;
     setBusy(true);
     setErr(null);
     try {
@@ -122,11 +129,35 @@ export function ClosePositionDialog({
           className="input mono"
           value={typed}
           placeholder={coin}
-          disabled={busy}
+          disabled={busy || skip}
           onChange={(e) => setTyped(e.target.value)}
           autoFocus
         />
       </div>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 10,
+          fontSize: 12,
+          color: "var(--fg-faint)",
+          cursor: busy ? "default" : "pointer",
+        }}
+        title="Skip this confirmation for every position close (Perps + Solana). Toggle back off here next time it shows, or in the Application settings card."
+      >
+        <input
+          type="checkbox"
+          checked={skip}
+          disabled={busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            setSkip(next);
+            setSkipCloseConfirm(next); // persist immediately
+          }}
+        />
+        Don't ask again — close positions without confirming
+      </label>
       {err && <div className="error-box">{err}</div>}
       <div className="modal-foot">
         <button className="btn" disabled={busy} onClick={onClose}>
@@ -134,7 +165,7 @@ export function ClosePositionDialog({
         </button>
         <button
           className="btn danger solid"
-          disabled={busy || !pctValid || typed !== coin}
+          disabled={busy || !pctValid || !gateOk}
           onClick={run}
         >
           {busy ? "Working…" : `Close ${pctValid ? pctNum : "…"}%`}

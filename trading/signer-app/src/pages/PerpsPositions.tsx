@@ -30,7 +30,8 @@ import {
   Scissors,
   TrendingUp,
 } from "lucide-react";
-import { type HlPosition, type HlStatus } from "../ipc";
+import { ipc, type HlPosition, type HlStatus } from "../ipc";
+import { getSkipCloseConfirm } from "../lib/prefs";
 import { EmptyHero, EmptyState, SkeletonRows, fmtUsd, timeAgo } from "../components/ui";
 import { PnlText } from "@degenbox/ui";
 import {
@@ -169,6 +170,32 @@ export function PerpsPositions({ hl, onReload, onGoOverview, embedded }: Props) 
     if (v == null || v <= 0 || v > 100) return null;
     return v;
   };
+
+  // Close entrypoint. When the operator has opted out of the confirm
+  // dialog ("Don't ask again"), fire the reduce-only close directly at
+  // the requested percent (no type-to-confirm friction); otherwise open
+  // the type-to-confirm dialog as before.
+  const requestClose = useCallback(
+    async (p: HlPosition, percent: number) => {
+      if (!getSkipCloseConfirm()) {
+        setPendingClose({ position: p, percent });
+        return;
+      }
+      try {
+        const res = await ipc.hlClosePosition(p.coin, percent);
+        setNotice(
+          res.status === "paper"
+            ? `Paper mode: ${percent}% close of ${p.coin} recorded (no live order).`
+            : `Close queued for your signer: ${percent}% of ${p.coin} (${res.cloid}).`,
+        );
+        setCustomText("");
+        onReload();
+      } catch (e) {
+        setNotice(`Close failed for ${p.coin}: ${String(e)}`);
+      }
+    },
+    [onReload],
+  );
 
   // ── render ─────────────────────────────────────────────────────────
 
@@ -355,7 +382,7 @@ export function PerpsPositions({ hl, onReload, onGoOverview, embedded }: Props) 
                               className={`btn xs ${pc === 100 ? "danger" : ""}`}
                               style={{ marginLeft: 4 }}
                               title={`Close ${pc}% of the live position (reduce-only, type-to-confirm)`}
-                              onClick={() => setPendingClose({ position: p, percent: pc })}
+                              onClick={() => requestClose(p, pc)}
                             >
                               {pc}
                             </button>
@@ -392,7 +419,7 @@ export function PerpsPositions({ hl, onReload, onGoOverview, embedded }: Props) 
                                   onClick={() => {
                                     const pc = customPct();
                                     if (pc == null) return;
-                                    setPendingClose({ position: p, percent: pc });
+                                    requestClose(p, pc);
                                   }}
                                 >
                                   <Scissors size={11} /> Close

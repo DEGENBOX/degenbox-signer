@@ -354,6 +354,16 @@ pub struct BotEngine {
     /// it per event (events for different wallets carry different
     /// config ids); plain bot/TP-SL engines never touch it.
     copy_config_id: Option<String>,
+    /// When set, the NEXT trade this engine submits reuses this EXISTING
+    /// `trading_intents` id (the web UI pre-created it for a MANUAL
+    /// buy/sell) instead of calling `create_intent` — mirroring the
+    /// daemon `/swap` `intentId` path + the FE's "reuse the intent row …
+    /// without this the signer would create a SECOND one and orphan the
+    /// first". [`create_or_submit_intent`](Self::create_or_submit_intent)
+    /// CONSUMES it (takes) on the first submit so it can never leak into
+    /// a later copy / TP-SL / bot trade that shares this engine. The
+    /// manual dispatch loop sets it per event and clears it after.
+    pending_intent_id: Option<String>,
 }
 
 impl BotEngine {
@@ -377,6 +387,7 @@ impl BotEngine {
             fee_strategy: None,
             fee_tier: FeeTier::Fast,
             copy_config_id: None,
+            pending_intent_id: None,
         }
     }
 
@@ -386,6 +397,44 @@ impl BotEngine {
     /// (pass `None`) if they reuse the engine for non-copy commands.
     pub fn set_copy_config_id(&mut self, config_id: Option<String>) {
         self.copy_config_id = config_id;
+    }
+
+    /// Stamp the EXISTING `trading_intents` id the next trade must submit
+    /// to instead of creating a fresh intent — see the field docs. The
+    /// manual-intent dispatch loop sets it before `execute_buy` /
+    /// `execute_sell_with_dedupe` and clears it (`None`) after, so a
+    /// stale id can never bleed into a subsequent copy/TP-SL/bot trade
+    /// on this shared engine.
+    pub fn set_pending_intent_id(&mut self, intent_id: Option<String>) {
+        self.pending_intent_id = intent_id;
+    }
+
+    /// Terminal step of every submit path: relay the signed bytes.
+    ///
+    /// * DEFAULT — create a fresh `trading_intents` row (`create_intent`)
+    ///   then submit it. This is the copy / TP-SL / bot / signal path.
+    /// * MANUAL — when [`set_pending_intent_id`](Self::set_pending_intent_id)
+    ///   stamped an id, submit that ALREADY-EXISTING intent directly and
+    ///   skip `create_intent` (the web UI pre-created the row so it could
+    ///   render a `pending` state; creating a second would orphan the
+    ///   first). The stamp is TAKEN so it is used exactly once.
+    ///
+    /// The gateway's atomic claim (`claim_intent_for_submit`) is the
+    /// double-submit authority either way, so a redelivery or a second
+    /// signer just loses the race with a benign 409.
+    async fn create_or_submit_intent(
+        &mut self,
+        req: CreateIntentReq,
+        signed_b64: &str,
+        relay: &RelayClient,
+    ) -> Result<SubmitResp, BotError> {
+        let intent_id = match self.pending_intent_id.take() {
+            Some(id) => id,
+            None => relay.create_intent(&req).await?.id,
+        };
+        Ok(relay
+            .submit(&intent_id, signed_b64, Some(&self.cfg.submit_mode))
+            .await?)
     }
 
     /// Swap the RPC endpoint the engine's per-trade `Simulator` builds
@@ -645,24 +694,25 @@ impl BotEngine {
             "slippage_bps": self.cfg.slippage_bps,
             "token_program": r.token_program.to_string(),
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "buy".into(),
-                input_mint: self.cfg.input_mint.clone(),
-                output_mint: sig.token_address.clone(),
-                amount_in_lamports: self.cfg.per_trade_lamports as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token: Some(client_token(&sig.call_id, "buy")),
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "buy".into(),
+                    input_mint: self.cfg.input_mint.clone(),
+                    output_mint: sig.token_address.clone(),
+                    amount_in_lamports: self.cfg.per_trade_lamports as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token: Some(client_token(&sig.call_id, "buy")),
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // 7. Mark the token ATA as known so subsequent buys can skip
@@ -731,24 +781,25 @@ impl BotEngine {
         let signed_b64 = sign_jupiter_tx_b64(&swap.swap_transaction, signer_keypair)?;
 
         // 5. Create intent + submit.
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "buy".into(),
-                input_mint: self.cfg.input_mint.clone(),
-                output_mint: sig.token_address.clone(),
-                amount_in_lamports: self.cfg.per_trade_lamports as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(serde_json::to_value(&quote).unwrap_or_default()),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token: Some(client_token(&sig.call_id, "buy")),
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "buy".into(),
+                    input_mint: self.cfg.input_mint.clone(),
+                    output_mint: sig.token_address.clone(),
+                    amount_in_lamports: self.cfg.per_trade_lamports as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(serde_json::to_value(&quote).unwrap_or_default()),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token: Some(client_token(&sig.call_id, "buy")),
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // 6. Record spend.
@@ -1082,24 +1133,25 @@ impl BotEngine {
             "token_in_amount": token_in_amount,
             "slippage_bps": self.cfg.slippage_bps,
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "sell".into(),
-                input_mint: token_mint.clone(),
-                output_mint: self.cfg.input_mint.clone(), // WSOL
-                amount_in_lamports: token_in_amount as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token,
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "sell".into(),
+                    input_mint: token_mint.clone(),
+                    output_mint: self.cfg.input_mint.clone(), // WSOL
+                    amount_in_lamports: token_in_amount as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token,
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         self.submitted_count += 1;
@@ -1152,24 +1204,25 @@ impl BotEngine {
         }
 
         let signed_b64 = sign_jupiter_tx_b64(&swap.swap_transaction, signer_keypair)?;
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "sell".into(),
-                input_mint: token_mint,
-                output_mint: self.cfg.input_mint.clone(),
-                amount_in_lamports: token_in_amount as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(serde_json::to_value(&quote).unwrap_or_default()),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token,
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "sell".into(),
+                    input_mint: token_mint,
+                    output_mint: self.cfg.input_mint.clone(),
+                    amount_in_lamports: token_in_amount as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(serde_json::to_value(&quote).unwrap_or_default()),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token,
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         self.submitted_count += 1;
@@ -1253,24 +1306,25 @@ impl BotEngine {
             "quote_in_lamports": self.cfg.per_trade_lamports,
             "slippage_bps": self.cfg.slippage_bps,
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "buy".into(),
-                input_mint: self.cfg.input_mint.clone(),
-                output_mint: sig.token_address.clone(),
-                amount_in_lamports: self.cfg.per_trade_lamports as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token: Some(client_token(&sig.call_id, "buy")),
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "buy".into(),
+                    input_mint: self.cfg.input_mint.clone(),
+                    output_mint: sig.token_address.clone(),
+                    amount_in_lamports: self.cfg.per_trade_lamports as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token: Some(client_token(&sig.call_id, "buy")),
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // Only the base-token ATA persists — the WSOL ATA is closed at
@@ -1361,24 +1415,25 @@ impl BotEngine {
             "quote_in_lamports": self.cfg.per_trade_lamports,
             "slippage_bps": self.cfg.slippage_bps,
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "buy".into(),
-                input_mint: self.cfg.input_mint.clone(),
-                output_mint: sig.token_address.clone(),
-                amount_in_lamports: self.cfg.per_trade_lamports as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token: Some(client_token(&sig.call_id, "buy")),
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "buy".into(),
+                    input_mint: self.cfg.input_mint.clone(),
+                    output_mint: sig.token_address.clone(),
+                    amount_in_lamports: self.cfg.per_trade_lamports as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token: Some(client_token(&sig.call_id, "buy")),
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // Only the coin ATA persists — the WSOL ATA is closed at the
@@ -1459,24 +1514,25 @@ impl BotEngine {
             "coin_in_amount": token_in_amount,
             "slippage_bps": self.cfg.slippage_bps,
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "sell".into(),
-                input_mint: token_mint,
-                output_mint: self.cfg.input_mint.clone(),
-                amount_in_lamports: token_in_amount as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token,
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "sell".into(),
+                    input_mint: token_mint,
+                    output_mint: self.cfg.input_mint.clone(),
+                    amount_in_lamports: token_in_amount as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token,
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // The WSOL proceeds ATA is closed inside the swap tx — do NOT
@@ -1555,24 +1611,25 @@ impl BotEngine {
             "base_in_amount": token_in_amount,
             "slippage_bps": self.cfg.slippage_bps,
         });
-        let intent = relay
-            .create_intent(&CreateIntentReq {
-                side: "sell".into(),
-                input_mint: token_mint,
-                output_mint: self.cfg.input_mint.clone(),
-                amount_in_lamports: token_in_amount as i64,
-                slippage_bps: Some(self.cfg.slippage_bps as i32),
-                submit_mode: Some(self.cfg.submit_mode.clone()),
-                tip_lamports: Some(self.cfg.tip_lamports),
-                preset_id: self.cfg.preset_id.clone(),
-                bot_session_id: self.cfg.bot_session_id.clone(),
-                quote_snapshot: Some(quote_snapshot),
-                copy_config_id: self.copy_config_id.clone(),
-                client_token,
-            })
-            .await?;
-        let resp = relay
-            .submit(&intent.id, &signed_b64, Some(&self.cfg.submit_mode))
+        let resp = self
+            .create_or_submit_intent(
+                CreateIntentReq {
+                    side: "sell".into(),
+                    input_mint: token_mint,
+                    output_mint: self.cfg.input_mint.clone(),
+                    amount_in_lamports: token_in_amount as i64,
+                    slippage_bps: Some(self.cfg.slippage_bps as i32),
+                    submit_mode: Some(self.cfg.submit_mode.clone()),
+                    tip_lamports: Some(self.cfg.tip_lamports),
+                    preset_id: self.cfg.preset_id.clone(),
+                    bot_session_id: self.cfg.bot_session_id.clone(),
+                    quote_snapshot: Some(quote_snapshot),
+                    copy_config_id: self.copy_config_id.clone(),
+                    client_token,
+                },
+                &signed_b64,
+                relay,
+            )
             .await?;
 
         // The WSOL proceeds ATA is closed inside the swap tx — do NOT

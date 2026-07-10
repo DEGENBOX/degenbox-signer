@@ -51,6 +51,7 @@ import {
 } from "../features/positions/data";
 import { ClientsStrip, type Unit, type UpnlSums } from "../features/positions/ClientsStrip";
 import { PositionChart } from "../features/positions/chart/PositionChart";
+import { getSkipCloseConfirm } from "../lib/prefs";
 
 const POLL_MS = 10_000;
 const CLIENTS_POLL_MS = 15_000;
@@ -283,17 +284,18 @@ export function SolPositions({ embedded }: { embedded?: boolean } = {}) {
 
   // ── actions ────────────────────────────────────────────────────────
 
-  const runSell = async () => {
-    if (!pendingSell) return;
+  // Core sell — used by both the confirm-modal path and the direct
+  // ("Don't ask again") path.
+  const doSell = async (sell: PendingSell) => {
     setSellBusy(true);
     setSellErr(null);
     try {
       const res = await ipc.solPositionSell(
-        pendingSell.position.mint,
-        pendingSell.fractionBps,
-        pendingSell.owner?.address ?? null,
+        sell.position.mint,
+        sell.fractionBps,
+        sell.owner?.address ?? null,
       );
-      setLastSell({ symbol: pendingSell.position.symbol, signature: res.signature });
+      setLastSell({ symbol: sell.position.symbol, signature: res.signature });
       setPendingSell(null);
       setCustomText("");
       await load();
@@ -304,9 +306,25 @@ export function SolPositions({ embedded }: { embedded?: boolean } = {}) {
     }
   };
 
-  const queueQuickSell = (p: SolPositionEx, bps: number) => {
+  const runSell = () => {
+    if (pendingSell) doSell(pendingSell);
+  };
+
+  // Close/sell entrypoint honouring the shared `dbx.skipCloseConfirm`
+  // pref: when set, fire the sell directly at the requested size (no
+  // confirm modal); otherwise open the confirm as before. The backend
+  // still clamps to on-chain balance and refuses ambiguous holders.
+  const requestSell = (sell: PendingSell) => {
     setSellErr(null);
-    setPendingSell({
+    if (getSkipCloseConfirm()) {
+      doSell(sell);
+    } else {
+      setPendingSell(sell);
+    }
+  };
+
+  const queueQuickSell = (p: SolPositionEx, bps: number) => {
+    requestSell({
       position: p,
       fractionBps: bps,
       label: `${bps / 100}%`,
@@ -432,6 +450,7 @@ export function SolPositions({ embedded }: { embedded?: boolean } = {}) {
         </div>
       )}
       {beErr && <div className="error-box">break-even stop: {beErr}</div>}
+      {sellErr && pendingSell === null && <div className="error-box">sell: {sellErr}</div>}
 
       <div className="shell-section-head">
         <span className="section-num">02</span>
@@ -626,8 +645,7 @@ export function SolPositions({ embedded }: { embedded?: boolean } = {}) {
                                   onClick={() => {
                                     const c = customBps(p);
                                     if (!c) return;
-                                    setSellErr(null);
-                                    setPendingSell({
+                                    requestSell({
                                       position: p,
                                       fractionBps: c.bps,
                                       label: c.label,

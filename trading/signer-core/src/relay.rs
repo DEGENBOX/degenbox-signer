@@ -64,6 +64,26 @@ impl RelayClient {
             .map_err(|e| RelayError::Decode(e.to_string()))
     }
 
+    /// `GET /api/trading/intents/{id}` — fetch one intent (owner-scoped
+    /// by the bearer token). The manual-intent executor calls this to
+    /// re-read AUTHORITATIVE status before it builds + signs: only a row
+    /// that is still `pending` (and unexpired, untagged) gets filled, so
+    /// the signer never races an intent the gateway — or another
+    /// signer — has already claimed. Mirrors the `mock_signer`'s
+    /// "grab pending intents" guard.
+    pub async fn get_intent(&self, id: &str) -> Result<IntentRow, RelayError> {
+        let url = format!("{}/api/trading/intents/{}", self.base, id);
+        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(RelayError::Status(status.as_u16(), body));
+        }
+        resp.json::<IntentRow>()
+            .await
+            .map_err(|e| RelayError::Decode(e.to_string()))
+    }
+
     /// `GET /api/alpha/presets/{preset_id}/matches` — bot-engine
     /// signal source. Returns the recent matches that the server's
     /// filter worker wrote into `alpha_preset_matches`. Polled in a
@@ -250,6 +270,21 @@ pub struct IntentRow {
     pub slippage_bps: i32,
     pub submit_mode: String,
     pub created_at: String,
+    /// RFC3339 expiry — the executor refuses to fill an expired intent.
+    /// `serde(default)` so a `create_intent` response (which omits it in
+    /// older gateways) still decodes.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Copy-trade tag — present ⇒ NOT a manual intent (the copy engine
+    /// already submitted it). The manual executor skips any tagged row.
+    #[serde(default)]
+    pub copy_config_id: Option<String>,
+    /// Bot-session tag — present ⇒ NOT a manual intent.
+    #[serde(default)]
+    pub bot_session_id: Option<String>,
+    /// `trading_clients.id` this intent is scoped to (multi-client).
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -7,8 +7,9 @@
 //!
 //! ```text
 //! unlock → resolve gateway auth → /auth/me (user uuid)
-//!        → spawn_sell_subscriber  (trading.sell.needed.{user})   1 WS
-//!        → spawn_copy_subscriber  (trading.copy.exec.{user})     1 WS
+//!        → spawn_sell_subscriber   (trading.sell.needed.{user})  1 WS
+//!        → spawn_copy_subscriber   (trading.copy.exec.{user})    1 WS
+//!        → spawn_intent_subscriber (trading.intent.{user})       1 WS
 //!        → select! loop
 //!            → route event by `wallet_pubkey`
 //!              (stamped → exactly the matching engine,
@@ -19,8 +20,10 @@
 //!
 //! The single consumption point is the double-execution guarantee: an
 //! event is received once and routed to at most one engine — N engines
-//! never share a subject subscription. (2 websockets per device total,
-//! independent of wallet count.)
+//! never share a subject subscription. (3 websockets per device total,
+//! independent of wallet count.) Manual intents (`trading.intent`) carry
+//! no wallet stamp, so they route to the PRIMARY engine and reuse the
+//! EXISTING `trading_intents` row (submit-to-existing, never a second).
 //!
 //! Differences from the CLI, all host-shape:
 //!
@@ -47,10 +50,10 @@ use crate::state::{AppState, ClientRole, RecentSign};
 use chrono::Utc;
 use degenbox_signer_core::{
     bot_engine::Decision, default_allowlist, resolve_buy_lamports, spawn_copy_subscriber_with,
-    spawn_sell_subscriber_with, wallet_event_is_mine, BotConfig, BotEngine, BudgetConfig,
-    BudgetState, CopyExecEvent, JupiterClient, Keypair, PresetMatcher, RelayClient, RelayError,
-    RpcClient, SellNeededEvent, Signer as _, StreamAuth, StreamHealth, StreamHealthSink,
-    TokenProvider, TriggerKind, WalletChain,
+    spawn_intent_subscriber_with, spawn_sell_subscriber_with, wallet_event_is_mine, BotConfig,
+    BotEngine, BudgetConfig, BudgetState, CopyExecEvent, JupiterClient, Keypair, ManualIntentEvent,
+    PresetMatcher, RelayClient, RelayError, RpcClient, SellNeededEvent, Signer as _, StreamAuth,
+    StreamHealth, StreamHealthSink, TokenProvider, TriggerKind, WalletChain,
 };
 use serde::Serialize;
 use solana_sdk::signature::SeedDerivable;
@@ -519,6 +522,16 @@ async fn run(
     let mut copy_rx = spawn_copy_subscriber_with(provider.clone(), user_id, Some(health.clone()))
         .await
         .map_err(|e| format!("copy stream subscribe: {e}"))?;
+    // Manual dashboard buys/sells: the web app pre-creates a
+    // `trading_intents` row (`POST /api/trading/intents`) then relies on
+    // a gateway-connected signer to fill it. We submit to that EXISTING
+    // row (never a second) — the copy/sell streams instead create their
+    // own. Routed to the PRIMARY engine (manual intents carry no wallet
+    // stamp; see `handle_manual`).
+    let mut intent_rx =
+        spawn_intent_subscriber_with(provider.clone(), user_id, Some(health.clone()))
+            .await
+            .map_err(|e| format!("intent stream subscribe: {e}"))?;
 
     // 4. One engine PER WALLET — sells bypass matcher/budget by
     //    construction (`execute_sell`). Sizing/budget policy is
@@ -691,6 +704,58 @@ async fn run(
                     Dispatch::NoEngine => {
                         tracing::warn!(mint = %short(&evt.mint), wallet = ?evt.wallet_pubkey,
                             "copy event stamped for a wallet not in this vault — ignored");
+                    }
+                }
+            }
+            evt = intent_rx.recv() => {
+                let Some(evt) = evt else {
+                    return Err("intent stream ended — relock/unlock to restart".into());
+                };
+                if refresh_relay(&state, &mut relay, &mut relay_auth).await && uses_proxy_default {
+                    rotate_proxy_rpc(&mut rpc, &mut engines, &relay_auth);
+                }
+                // Only USER-created manual intents. Copy / TP-SL / bot
+                // intents are announced on this same subject at create
+                // time but are submitted by their own path — the
+                // `is_untagged` fast-path + the authoritative status
+                // re-check in `handle_manual` keep us from double-filling
+                // them.
+                if !evt.is_untagged() {
+                    tracing::debug!(intent = %short(&evt.id.to_string()),
+                        "intent skipped — copy/bot-tagged (not manual)");
+                } else if evt.side != "buy" && evt.side != "sell" {
+                    tracing::warn!(side = %evt.side, "manual intent with unknown side — ignored");
+                } else {
+                    // Manual intents carry no wallet stamp; route to the
+                    // PRIMARY engine exactly like a legacy unstamped event
+                    // (exactly-one-engine rule preserved).
+                    match pick_engine(&slots_view(slots), None) {
+                        Dispatch::Run(i) => {
+                            let slot = &slots[i];
+                            handle_manual(
+                                &state,
+                                &slot.rt,
+                                &mut engines[i],
+                                &jup,
+                                &relay,
+                                &rpc,
+                                slot.kp.as_ref(),
+                                evt,
+                            )
+                            .await;
+                        }
+                        Dispatch::Paused(i) => {
+                            let slot = &slots[i];
+                            let token = if evt.side == "sell" { &evt.input_mint } else { &evt.output_mint };
+                            tracing::info!(intent = %short(&evt.id.to_string()), wallet = %short(&slot.wallet),
+                                "manual intent skipped — client paused");
+                            push(&state, if evt.side == "sell" { "manual sell" } else { "manual buy" }, token, "skipped (paused)");
+                            mark_event(&slot.rt, false, evt.side == "sell");
+                        }
+                        Dispatch::NoEngine => {
+                            tracing::warn!(intent = %short(&evt.id.to_string()),
+                                "manual intent but no primary Sol engine in this vault — ignored");
+                        }
                     }
                 }
             }
@@ -1069,6 +1134,179 @@ async fn handle_copy(
         }
     }
     engine.set_copy_config_id(None);
+}
+
+/// WSOL mint — the fixed SOL leg of every dashboard buy/sell.
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+/// Manual (dashboard) buy/sell execution.
+///
+/// Unlike copy/TP-SL, the `trading_intents` row ALREADY EXISTS (the web
+/// UI created it so it could render a `pending` state). We fill THAT row:
+/// [`BotEngine::set_pending_intent_id`] makes the shared quote→build→
+/// sign→relay path submit the existing intent instead of creating a
+/// second one (mirrors the daemon `/swap` `intentId` path). Safety gates,
+/// in order:
+///
+/// 1. **Expiry** — refuse an intent past `expires_at` (the gateway's
+///    `claim_intent_for_submit` gates on it too).
+/// 2. **Authoritative status re-check** (`GET /api/trading/intents/{id}`)
+///    — the WS payload's `pending` is a create-time snapshot; every
+///    signer-created intent is announced here and the local daemon / a
+///    second device may already have filled a real manual one. We fill
+///    ONLY a row the gateway still reports `pending`, untagged, and not
+///    client-scoped. Fail-closed on a read error.
+/// 3. **Atomic claim** (server-side) — the final double-submit authority;
+///    a lost race returns a benign 409 we treat as "already handled".
+///
+/// The stamp is CLEARED after every call so a skipped/failed manual can
+/// never leak its id into the next copy/TP-SL/bot trade on this engine.
+#[allow(clippy::too_many_arguments)]
+async fn handle_manual(
+    state: &AppState,
+    rt: &SharedSolRuntime,
+    engine: &mut BotEngine,
+    jup: &JupiterClient,
+    relay: &RelayClient,
+    rpc: &RpcClient,
+    kp: &Keypair,
+    evt: ManualIntentEvent,
+) {
+    let is_sell = evt.side == "sell";
+    let label = if is_sell { "manual sell" } else { "manual buy" };
+    // The token side (for buys the output, for sells the input); the
+    // other leg is always WSOL on the dashboard path.
+    let token_mint = if is_sell {
+        evt.input_mint.clone()
+    } else {
+        evt.output_mint.clone()
+    };
+    let intent_id = evt.id.to_string();
+
+    // Guard the SOL leg: the engine always swaps against WSOL, so an
+    // intent whose SOL leg is a different mint would fill with the wrong
+    // route. The dashboard never produces this — refuse rather than guess.
+    let sol_leg_ok = if is_sell {
+        evt.output_mint == WSOL_MINT
+    } else {
+        evt.input_mint == WSOL_MINT
+    };
+    if !sol_leg_ok {
+        tracing::warn!(intent = %short(&intent_id),
+            "manual intent SOL leg is not WSOL — unsupported, skipped");
+        push(state, label, &token_mint, "skipped (unsupported)");
+        return;
+    }
+
+    // 1. Expiry.
+    if evt.expires_at <= Utc::now() {
+        tracing::info!(intent = %short(&intent_id), "manual intent expired — skipped");
+        push(state, label, &token_mint, "skipped (expired)");
+        return;
+    }
+
+    // 2. Authoritative status re-check — fail-closed.
+    match relay.get_intent(&intent_id).await {
+        Ok(row) => {
+            if row.status != "pending" {
+                tracing::info!(intent = %short(&intent_id), status = %row.status,
+                    "manual intent no longer pending — skipped");
+                return;
+            }
+            if row.copy_config_id.is_some() || row.bot_session_id.is_some() {
+                tracing::debug!(intent = %short(&intent_id),
+                    "intent is copy/bot-tagged — not manual, skipped");
+                return;
+            }
+            if row.client_id.is_some() {
+                // The wire carries no wallet pubkey and the gateway
+                // `trading_clients.id` is not the local vault id, so we
+                // can't map it to a wallet. Refuse rather than spend on
+                // the wrong wallet (deferred: multi-client manual routing).
+                tracing::warn!(intent = %short(&intent_id), client_id = ?row.client_id,
+                    "manual intent scoped to a specific client — can't resolve to a local wallet, skipped");
+                push(state, label, &token_mint, "skipped (client-scoped)");
+                return;
+            }
+        }
+        Err(RelayError::Status(404, _)) => {
+            tracing::info!(intent = %short(&intent_id), "manual intent gone (404) — skipped");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(intent = %short(&intent_id), error = %e,
+                "manual intent status recheck failed — skipped (fail-closed)");
+            flag_auth_expired_if_401(rt, &e.to_string());
+            return;
+        }
+    }
+
+    // 3. Execute against the EXISTING intent, then always clear the stamp.
+    let slippage = u16::try_from(evt.slippage_bps.clamp(1, 10_000)).unwrap_or(100);
+    tracing::info!(intent = %short(&intent_id), mint = %short(&token_mint), side = %evt.side,
+        amount = evt.amount_in_lamports, "manual intent executing");
+    engine.set_pending_intent_id(Some(intent_id.clone()));
+    let result = if is_sell {
+        let token_amount = evt.amount_in_lamports.max(0) as u64;
+        engine
+            .execute_sell_with_dedupe(
+                Some(intent_id.clone()),
+                token_mint.clone(),
+                token_amount,
+                None,
+                jup,
+                relay,
+                rpc,
+                kp,
+            )
+            .await
+    } else {
+        let lamports = evt.amount_in_lamports.max(0) as u64;
+        engine
+            .execute_buy(
+                intent_id.clone(),
+                token_mint.clone(),
+                lamports,
+                Some(slippage),
+                None,
+                jup,
+                relay,
+                rpc,
+                kp,
+            )
+            .await
+    };
+    engine.set_pending_intent_id(None);
+
+    match result {
+        Ok(Decision::Submitted(_)) => {
+            push(state, label, &token_mint, "submitted");
+            mark_event(rt, true, is_sell);
+            restore_ready_after_success(rt);
+        }
+        Ok(Decision::Skipped(r)) => {
+            tracing::info!(intent = %short(&intent_id), reason = %r, "manual intent skipped");
+            push(state, label, &token_mint, "skipped");
+            mark_event(rt, false, is_sell);
+        }
+        Err(e) => {
+            let es = e.to_string();
+            // Lost the server-side claim race (local daemon / another
+            // device won) → 409. Benign, not a failure.
+            if es.contains("status 409") {
+                tracing::info!(intent = %short(&intent_id), detail = %es,
+                    "manual intent already handled elsewhere — skipped");
+                push(state, label, &token_mint, "skipped (already handled)");
+                mark_event(rt, false, is_sell);
+            } else {
+                tracing::warn!(intent = %short(&intent_id), error = %es, "manual intent failed");
+                push(state, label, &token_mint, "failed");
+                rt.update(|s| s.error = Some(format!("{label} {}: {e}", short(&token_mint))));
+                mark_event(rt, false, is_sell);
+                flag_auth_expired_if_401(rt, &es);
+            }
+        }
+    }
 }
 
 /// Resolve the pct-of-balance denominator for a copy buy (slice 8).
